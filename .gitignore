@@ -1,0 +1,15 @@
+references/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+relayd/bin/
+.DS_Store
+.relay/
+dashboard/node_modules/

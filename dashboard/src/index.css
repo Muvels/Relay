@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/* Modal-inspired dark palette: near-black canvas, hairline borders, a
+   single lime accent. One committed dark look (this is an ops tool). */
+/* Values sampled from modal.com's computed styles (2026-08-18): neutral
+   grays with no blue tint, elevation by background contrast, and the only
+   real borders are white at ~10% alpha. */
+@theme {
+  --color-canvas: #181818;
+  --color-panel: #222222;
+  --color-panel-2: #2f2f2f;
+  --color-hair: rgba(255, 255, 255, 0.1);
+  --color-hair-2: rgba(255, 255, 255, 0.18);
+  --color-ink: #ffffff;
+  --color-ink-body: #d1d1d1;
+  --color-ink-dim: #bababa;
+  --color-ink-faint: #8a8a8a;
+  --color-accent: #7fee64;
+  --color-accent-dim: #222d20;
+  --color-accent-mid: #37582f;
+  --color-good: #7fee64;
+  --color-warn: #e3b341;
+  --color-bad: #f47067;
+
+  --font-sans: ui-sans-serif, -apple-system, "Segoe UI", Inter, Roboto,
+    "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: var(--color-ink-body);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+/* Thin scrollbars that match the theme. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-hair-2) transparent;
+}

@@ -1,0 +1,8 @@
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: ../relayd/internal/proto
+    opt: module=github.com/matteomarolt/relay/relayd/internal/proto
+  - local: protoc-gen-go-grpc
+    out: ../relayd/internal/proto
+    opt: module=github.com/matteomarolt/relay/relayd/internal/proto

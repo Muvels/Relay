@@ -1,0 +1,2 @@
+# This marker makes examples/ its own Relay project root, so bundles ship
+# just the example files instead of the whole development repo above it.

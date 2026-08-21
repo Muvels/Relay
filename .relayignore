@@ -1,0 +1,11 @@
+# Safety net for apps created at the Relay repo root: keep the development
+# tree out of code bundles. (examples/ has its own project marker.)
+references
+relayd
+research
+docs
+proto
+installer
+sdk/tests
+*.md
+Makefile

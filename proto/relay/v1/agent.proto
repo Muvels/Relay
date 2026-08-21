@@ -1,0 +1,257 @@
+// relay.v1 defines the agent ↔ server contract.
+//
+// Direction of connection is the whole design: the agent DIALS OUT to the
+// server and holds one bidirectional Session stream. The server never
+// connects to a machine. The SDK/CLI path is HTTP/JSON (see
+// internal/server/http.go), not this proto.
+
+syntax = "proto3";
+
+package relay.v1;
+
+option go_package = "github.com/matteomarolt/relay/relayd/internal/proto/relayv1;relayv1";
+
+// ---------------------------------------------------------------- common
+
+message Accelerator {
+  string kind = 1;        // "cuda" | "mps"
+  uint64 memory_mib = 2;  // 0 = any amount
+  uint32 count = 3;
+}
+
+message Resources {
+  double cpus = 1;                              // 0 = unconstrained
+  uint64 memory_mib = 2;                        // 0 = unconstrained
+  repeated Accelerator accelerator_options = 3; // any-of; empty = none needed
+  uint32 timeout_s = 4;                         // 0 = none
+}
+
+message DetectedAccelerator {
+  string kind = 1;             // "cuda" | "mps"
+  string name = 2;             // "NVIDIA GB10", "Apple M3 Max"
+  uint64 memory_mib = 3;       // best-effort; see memory_unreliable
+  int32 index = 4;
+  // True on unified-memory parts (DGX Spark GB10, Apple Silicon) where the
+  // driver cannot report a dedicated pool; memory_mib then mirrors system
+  // memory and the scheduler must budget one shared pool.
+  bool memory_unreliable = 5;
+}
+
+message MachineInventory {
+  string hostname = 1;
+  string os = 2;    // "linux" | "darwin"
+  string arch = 3;  // "amd64" | "arm64"
+  uint32 cpu_cores = 4;
+  uint64 memory_mib = 5;
+  repeated DetectedAccelerator accelerators = 6;
+  repeated string executors = 7;  // "docker", "docker-cuda", "native-mps"
+  bool unified_memory = 8;
+  string agent_version = 9;
+}
+
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_PENDING = 1;    // queued on the server
+  RUN_ASSIGNED = 2;   // sent to an agent
+  RUN_BUILDING = 3;   // agent building/pulling the image
+  RUN_RUNNING = 4;
+  RUN_SUCCEEDED = 5;
+  RUN_FAILED = 6;     // user function raised (result blob has details)
+  RUN_ERROR = 7;      // infrastructure failure outside the function
+  RUN_CANCELED = 8;
+  RUN_LOST = 9;       // agent vanished while the run was live
+}
+
+message RunSpec {
+  string run_id = 1;
+  string app = 2;
+  string function = 3;
+  string entry_file = 4;
+  Resources resources = 5;
+  string image_tag = 6;         // content-addressed relay-img:<hash>
+  string image_dockerfile = 7;  // agent builds natively when tag is missing
+  string bundle_sha256 = 8;     // project tarball blob
+  string args_sha256 = 9;       // pickled-call blob
+  uint32 runtime_protocol = 10;
+  string python_minor = 11;     // client interpreter, e.g. "3.14"
+
+  // Scheduler decision (M2+): which devices this run may use. Agents pin
+  // containers to exactly these (DeviceRequests.DeviceIDs), never "all".
+  string accelerator_kind = 12;      // "cuda" | "mps" | ""
+  repeated int32 device_indices = 13;
+
+  // Machine-local volumes: container mount path → volume name. Volumes
+  // live under the agent state dir; data stays on the machine that wrote it.
+  map<string, string> volumes = 14;
+
+  // Secret NAMES only. Values never ride in a RunSpec because they would persist
+  // on run rows). Agents fetch values via GetSecrets at run start.
+  repeated string secret_names = 15;
+
+  // Services (M4): kind distinguishes one-shot jobs from supervised
+  // long-running services.
+  string kind = 16;          // "" | "job" | "service"
+  uint32 service_port = 17;  // container port the service listens on
+  string expose = 18;        // "private" (LAN port) | "public" (tunnel)
+  // Capability key for the public auth proxy; anonymous access requires the
+  // user to have opted out explicitly (auth="none" → empty key + expose ok).
+  string service_key = 19;
+  bool service_auth_none = 20;
+
+  // Native (containerless) execution info for MPS machines (M5). Only
+  // pip-installable images qualify; apt/run/registry ops are Docker-only.
+  NativeEnv native_env = 21;
+}
+
+message NativeEnv {
+  bool supported = 1;                 // false → never place on native executors
+  string python_minor = 2;            // interpreter to venv ("3.14")
+  repeated string pip_packages = 3;   // incl. the exact cloudpickle pin
+  map<string, string> env = 4;        // Image.env() vars
+}
+
+// ---------------------------------------------------------------- service
+
+service AgentService {
+  // Exchange a one-time join token for machine credentials.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // The long-lived control stream. Agent speaks first with Hello.
+  // Authenticated with the agent token as a bearer credential in metadata.
+  rpc Session(stream AgentMessage) returns (stream ServerMessage);
+
+  rpc HasBlob(BlobRequest) returns (BlobStat);
+  rpc DownloadBlob(BlobRequest) returns (stream BlobChunk);
+  rpc UploadBlob(stream BlobChunk) returns (BlobStat);
+
+  // Secret values for a run this machine was assigned. The server only
+  // releases names referenced by the calling machine's active runs.
+  rpc GetSecrets(SecretsRequest) returns (SecretsResponse);
+}
+
+message SecretsRequest {
+  string run_id = 1;
+  repeated string names = 2;
+}
+
+message SecretsResponse {
+  map<string, string> values = 1;
+}
+
+message RegisterRequest {
+  string join_token = 1;
+  string requested_name = 2;  // "" = server derives from hostname
+  MachineInventory inventory = 3;
+}
+
+message RegisterResponse {
+  string machine_id = 1;
+  string machine_name = 2;
+  string agent_token = 3;
+}
+
+message AgentMessage {
+  oneof msg {
+    AgentHello hello = 1;
+    Heartbeat heartbeat = 2;
+    RunStatusUpdate run_status = 3;
+    LogBatch logs = 4;
+    ExecOutput exec_output = 5;
+  }
+}
+
+// Host-command execution (relay shell): bounded, non-interactive, output
+// streamed back in chunks. There is no stdin or PTY. `relay shell spark nvidia-smi`
+// territory, not a login shell (machines stay SSH-reachable for that).
+message ExecOutput {
+  string exec_id = 1;
+  bytes chunk = 2;
+  bool done = 3;
+  int32 exit_code = 4;
+  string error = 5; // spawn failure etc.
+}
+
+message AgentHello {
+  string machine_id = 1;
+  MachineInventory inventory = 2;
+  repeated string cached_image_tags = 3;  // scheduler locality input
+  repeated string active_run_ids = 4;     // reconciliation after reconnect
+}
+
+message AcceleratorUsage {
+  int32 index = 1;
+  uint64 memory_used_mib = 2;
+  double utilization = 3;  // 0..1, best-effort
+}
+
+message Heartbeat {
+  double cpu_used_cores = 1;
+  uint64 memory_used_mib = 2;
+  repeated AcceleratorUsage accelerators = 3;
+  uint64 disk_free_mib = 4;
+}
+
+message RunStatusUpdate {
+  string run_id = 1;
+  RunState state = 2;
+  string detail = 3;          // human-readable ("pulling python:3.14-slim")
+  int32 exit_code = 4;
+  string result_sha256 = 5;   // set on SUCCEEDED / FAILED
+  string endpoint = 6;        // services: where it is reachable
+}
+
+message LogLine {
+  int64 ts_unix_ms = 1;
+  string line = 2;
+  bool stderr = 3;
+}
+
+message LogBatch {
+  string run_id = 1;
+  repeated LogLine lines = 2;
+}
+
+message ServerMessage {
+  oneof msg {
+    ServerHello hello = 1;
+    RunAssignment assign = 2;
+    CancelRun cancel = 3;
+    ExecRequest exec = 4;
+  }
+}
+
+message ExecRequest {
+  string exec_id = 1;
+  repeated string argv = 2;
+  uint32 timeout_s = 3;
+}
+
+message ServerHello {
+  string server_version = 1;
+  uint32 heartbeat_interval_s = 2;
+}
+
+message RunAssignment {
+  RunSpec spec = 1;
+}
+
+message CancelRun {
+  string run_id = 1;
+}
+
+// ---------------------------------------------------------------- blobs
+
+message BlobRequest {
+  string sha256 = 1;
+}
+
+message BlobChunk {
+  string sha256 = 1;  // set on the first chunk
+  bytes data = 2;
+}
+
+message BlobStat {
+  string sha256 = 1;
+  bool exists = 2;
+  uint64 size = 3;
+}
