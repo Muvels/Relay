@@ -54,6 +54,7 @@ class TestGpuShorthand:
     def test_memory_string(self):
         gpu = parse_gpu("24GB")
         assert gpu.kind == "cuda" and gpu.memory_mib == 24 * 1024 and gpu.count == 1
+        assert gpu.exclusive is True
 
     def test_count_int(self):
         assert parse_gpu(2).count == 2
@@ -61,10 +62,25 @@ class TestGpuShorthand:
     def test_any(self):
         gpu = parse_gpu("any")
         assert gpu.kind == "cuda" and gpu.memory_mib == 0
+        assert gpu.exclusive is True
 
     def test_explicit_object_passthrough(self):
-        spec = relay.GPU(memory="40GB", count=2)
+        spec = relay.GPU(memory="40GB", count=2, exclusive=False)
         assert parse_gpu(spec) is spec
+
+    def test_explicit_shared_needs_memory_budget(self):
+        with pytest.raises(SpecError, match="needs a memory reservation"):
+            relay.GPU(exclusive=False)
+
+    def test_explicit_exclusive_can_set_device_minimum(self):
+        gpu = relay.GPU(memory="40GB", exclusive=True)
+        assert gpu.memory_mib == 40 * 1024
+        assert gpu.exclusive is True
+
+    @pytest.mark.parametrize("value", [0, 1, "false"])
+    def test_exclusive_must_be_boolean(self, value):
+        with pytest.raises(SpecError, match="must be true or false"):
+            relay.GPU(memory="8GB", exclusive=value)
 
     def test_none(self):
         assert parse_gpu(None) is None
@@ -88,6 +104,10 @@ class TestAccelerators:
     def test_gpu_and_accelerator_mutually_exclusive(self):
         with pytest.raises(SpecError, match="not both"):
             build_resources(gpu="24GB", accelerator=relay.MPS())
+
+    def test_description_names_sharing_mode(self):
+        assert relay.GPU(memory="24GB", exclusive=False).describe().endswith("shared")
+        assert relay.GPU().describe().endswith("exclusive")
 
 
 class TestBuildResources:

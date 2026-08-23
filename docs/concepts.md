@@ -48,9 +48,38 @@ Three phases, pure function, every rejection explained per machine:
 2. **Admission:** against a **reservation ledger** derived from live runs
    (never live utilization: time-slicing lies and GB10 NVML is broken).
    Unified-memory machines (DGX Spark, Apple Silicon) budget ONE pool for
-   RAM + accelerator; `gpu="any"` reserves the device exclusively.
+   RAM + accelerator. GPU access is exclusive by default: `gpu="any"` owns
+   any available device, while `gpu="24GB"` owns a device with at least 24GB.
 3. **Score:** image-cache locality dominates, then tightest-fit packing
    (small jobs keep big cards free), then load spreading.
+
+GPU sharing is an explicit opt-in with a fixed per-device VRAM reservation:
+
+```python
+@app.service(
+    port=8000,
+    gpu=relay.GPU(memory="24GB", exclusive=False),
+)
+def model_server():
+    ...
+```
+
+Relay may place other shared work on the same physical GPU while the sum of
+its reservations fits. The 24GB is ledger capacity, not a physical
+preallocation or a CUDA-enforced ceiling: a service currently using 15GB
+still retains 9GB of headroom in the scheduler. Both containers receive the
+same device and contend for compute. If either process exceeds its declared
+VRAM budget, the driver may report CUDA OOM; Relay does not dynamically pack
+guaranteed jobs into momentarily unused headroom.
+
+An exclusive request may also state a minimum device size explicitly:
+
+```python
+relay.GPU(memory="80GB", exclusive=True)
+```
+
+`exclusive=False` without `memory=` is rejected because the scheduler would
+have no safe amount to reserve.
 
 `relay.any_of(...)` lists **unordered** alternatives. The scheduler picks
 whichever places best. Queued runs carry the reason in `relay ps`:

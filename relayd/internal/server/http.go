@@ -170,6 +170,11 @@ func resourceChip(specJSON string) string {
 		if a.Count > 1 {
 			s += fmt.Sprintf(" ×%d", a.Count)
 		}
+		if a.isExclusive() {
+			s += " exclusive"
+		} else {
+			s += " shared"
+		}
 		parts = append(parts, s)
 	}
 	return strings.Join(parts, " | ")
@@ -196,6 +201,10 @@ func (a *httpAPI) submitRun(w http.ResponseWriter, r *http.Request) {
 	if spec.Kind == "service" {
 		writeErr(w, http.StatusBadRequest,
 			"services deploy via POST /v1/services (relay deploy), not /v1/runs")
+		return
+	}
+	if err := spec.validateAccelerators(); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad accelerator spec: %v", err)
 		return
 	}
 	for _, sha := range []string{spec.BundleSha, spec.ArgsSha} {
@@ -321,6 +330,10 @@ func (a *httpAPI) deployService(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusBadRequest,
 			`expose must be "private", "funnel", or "public"`)
+		return
+	}
+	if err := spec.validateAccelerators(); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad accelerator spec: %v", err)
 		return
 	}
 	for _, sha := range []string{spec.BundleSha, spec.ArgsSha} {

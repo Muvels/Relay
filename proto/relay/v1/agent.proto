@@ -15,8 +15,11 @@ option go_package = "github.com/matteomarolt/relay/relayd/internal/proto/relayv1
 
 message Accelerator {
   string kind = 1;        // "cuda" | "mps"
-  uint64 memory_mib = 2;  // 0 = any amount
+  uint64 memory_mib = 2;  // minimum per-device VRAM; 0 = any amount
   uint32 count = 3;
+  // Exclusive requests require an otherwise-unreserved device and reserve
+  // its complete capacity. Shared requests reserve memory_mib only.
+  bool exclusive = 4;
 }
 
 message Resources {

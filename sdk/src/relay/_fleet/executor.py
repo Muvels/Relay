@@ -97,7 +97,12 @@ class FleetExecutor:
         accelerators = []
         if spec.resources.accelerators:
             accelerators = [
-                {"kind": a.kind, "memory_mib": a.memory_mib, "count": a.count}
+                {
+                    "kind": a.kind,
+                    "memory_mib": a.memory_mib,
+                    "count": a.count,
+                    "exclusive": a.exclusive,
+                }
                 for a in spec.resources.accelerators.options
             ]
         return {

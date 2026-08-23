@@ -119,6 +119,11 @@ def vllm_server():
     subprocess.run(["vllm", "serve", "Qwen/Qwen3-4B", "--port", "8000"])
 ```
 
+GPU requests are exclusive by default, so this service owns one device with
+at least 40GB. To deliberately co-locate it with other GPU work, use a fixed
+VRAM reservation: `gpu=relay.GPU(memory="40GB", exclusive=False)`. Shared
+reservations are scheduling promises rather than enforced CUDA memory limits.
+
 ```bash
 relay deploy app.py
 # → deploying trainer.vllm_server (run_…)

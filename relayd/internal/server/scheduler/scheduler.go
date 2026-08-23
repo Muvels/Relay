@@ -50,6 +50,7 @@ type AccelRequest struct {
 	Kind      string
 	MemoryMiB uint64
 	Count     int
+	Exclusive bool
 }
 
 type Request struct {
@@ -120,6 +121,12 @@ func optionUsable(req Request, m *Machine, opt AccelRequest) bool {
 		return false
 	}
 	return hasExecutor(m, executorFor(opt.Kind))
+}
+
+// exclusiveRequest preserves the pre-explicit-field contract for old clients
+// and direct scheduler callers: zero VRAM means whole-device ownership.
+func exclusiveRequest(opt AccelRequest) bool {
+	return opt.Exclusive || opt.MemoryMiB == 0
 }
 
 func mib(v uint64) string {
@@ -280,7 +287,7 @@ func admit(req Request, m *Machine) (*Decision, string) {
 		perDevice := opt.MemoryMiB
 		for _, idx := range indices {
 			amount := perDevice
-			if amount == 0 { // "any GPU" reserves the device whole
+			if exclusiveRequest(opt) {
 				amount = deviceMem(m, idx)
 			}
 			reserve[idx] = amount
@@ -340,11 +347,11 @@ func admitUnified(req Request, m *Machine) (*Decision, string) {
 				count, opt.Kind, len(kindDevices))
 			continue
 		}
-		// A memory-less GPU request on unified silicon reserves the whole
-		// remaining pool for the device. "Any GPU" means exclusive use,
-		// exactly like whole-device reservation on discrete cards.
+		// An exclusive request on unified silicon reserves the whole remaining
+		// pool for the device. A non-zero memory amount is still a minimum
+		// device-size requirement, not the amount retained in the ledger.
 		perDevice := opt.MemoryMiB
-		wholeDevice := perDevice == 0
+		wholeDevice := exclusiveRequest(*opt)
 		// Skip devices already carrying reservations when exclusive.
 		var picked []AccelDevice
 		for _, d := range kindDevices {
@@ -362,6 +369,14 @@ func admitUnified(req Request, m *Machine) (*Decision, string) {
 			continue
 		}
 		accelNeed := perDevice * uint64(count)
+		minimumNeed := req.MemoryMiB + accelNeed
+		if minimumNeed > free {
+			lastReason = fmt.Sprintf(
+				"%s of %s unified memory free, needs at least %s (RAM %s + accelerator %s)",
+				mib(free), mib(m.MemoryMiB), mib(minimumNeed),
+				mib(req.MemoryMiB), mib(accelNeed))
+			continue
+		}
 		if wholeDevice {
 			accelNeed = free - min(req.MemoryMiB, free) // the rest of the pool
 		}
@@ -427,9 +442,13 @@ func pickDevices(opt AccelRequest, m *Machine) ([]int, string) {
 			continue
 		}
 		kindDevices++
-		free := d.MemoryMiB - min(m.Reserved.DeviceMemMiB[d.Index], d.MemoryMiB)
+		reserved := min(m.Reserved.DeviceMemMiB[d.Index], d.MemoryMiB)
+		if exclusiveRequest(opt) && reserved > 0 {
+			continue
+		}
+		free := d.MemoryMiB - reserved
 		need := opt.MemoryMiB
-		if need == 0 {
+		if exclusiveRequest(opt) && need == 0 {
 			need = d.MemoryMiB // whole-device reservation
 		}
 		if free >= need {

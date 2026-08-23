@@ -99,10 +99,13 @@ func (RunState) EnumDescriptor() ([]byte, []int) {
 }
 
 type Accelerator struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`                             // "cuda" | "mps"
-	MemoryMib     uint64                 `protobuf:"varint,2,opt,name=memory_mib,json=memoryMib,proto3" json:"memory_mib,omitempty"` // 0 = any amount
-	Count         uint32                 `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Kind      string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`                             // "cuda" | "mps"
+	MemoryMib uint64                 `protobuf:"varint,2,opt,name=memory_mib,json=memoryMib,proto3" json:"memory_mib,omitempty"` // minimum per-device VRAM; 0 = any amount
+	Count     uint32                 `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
+	// Exclusive requests require an otherwise-unreserved device and reserve
+	// its complete capacity. Shared requests reserve memory_mib only.
+	Exclusive     bool `protobuf:"varint,4,opt,name=exclusive,proto3" json:"exclusive,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -156,6 +159,13 @@ func (x *Accelerator) GetCount() uint32 {
 		return x.Count
 	}
 	return 0
+}
+
+func (x *Accelerator) GetExclusive() bool {
+	if x != nil {
+		return x.Exclusive
+	}
+	return false
 }
 
 type Resources struct {
@@ -1988,12 +1998,13 @@ var File_relay_v1_agent_proto protoreflect.FileDescriptor
 
 const file_relay_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x14relay/v1/agent.proto\x12\brelay.v1\"V\n" +
+	"\x14relay/v1/agent.proto\x12\brelay.v1\"t\n" +
 	"\vAccelerator\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1d\n" +
 	"\n" +
 	"memory_mib\x18\x02 \x01(\x04R\tmemoryMib\x12\x14\n" +
-	"\x05count\x18\x03 \x01(\rR\x05count\"\xa3\x01\n" +
+	"\x05count\x18\x03 \x01(\rR\x05count\x12\x1c\n" +
+	"\texclusive\x18\x04 \x01(\bR\texclusive\"\xa3\x01\n" +
 	"\tResources\x12\x12\n" +
 	"\x04cpus\x18\x01 \x01(\x01R\x04cpus\x12\x1d\n" +
 	"\n" +

@@ -27,6 +27,9 @@ run = train.spawn(1000)   # fire and forget → run.status() / .logs() / .result
   admits against a reservation ledger (unified-memory aware for DGX Spark and
   Apple Silicon), and packs by best fit with image-cache locality. Queued runs
   tell you *per machine* why they're waiting.
+- **Explicit GPU sharing**: GPU access is exclusive by default. Use
+  `relay.GPU(memory="24GB", exclusive=False)` to deliberately co-locate jobs
+  and services against fixed VRAM reservations on the same device.
 - **CUDA and MPS in one system**: Linux boxes run jobs in Docker with pinned
   GPUs; Apple Silicon runs them natively in uv-managed venvs (Metal cannot be
   containerized). `accelerator=relay.any_of(relay.CUDA(...), relay.MPS(...))`

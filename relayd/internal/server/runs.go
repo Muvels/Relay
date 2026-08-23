@@ -43,6 +43,28 @@ type AccJSON struct {
 	Kind      string `json:"kind"`
 	MemoryMiB uint64 `json:"memory_mib"`
 	Count     uint32 `json:"count"`
+	// Pointer distinguishes an old SDK that omitted this field from a new
+	// client explicitly opting into sharing with false.
+	Exclusive *bool `json:"exclusive,omitempty"`
+}
+
+func (a AccJSON) isExclusive() bool {
+	if a.Exclusive != nil {
+		return *a.Exclusive
+	}
+	// Compatibility with pre-field clients: concrete VRAM amounts were
+	// shareable and memory-less requests meant whole-device ownership.
+	return a.MemoryMiB == 0
+}
+
+func (spec *RunSpecJSON) validateAccelerators() error {
+	for _, a := range spec.Accelerators {
+		if a.Exclusive != nil && !*a.Exclusive && a.MemoryMiB == 0 {
+			return fmt.Errorf(
+				"shared %s accelerator needs a non-zero memory_mib reservation", a.Kind)
+		}
+	}
+	return nil
 }
 
 type NativeEnvJSON struct {
@@ -67,6 +89,7 @@ func (spec *RunSpecJSON) toProto(runID string, d *scheduler.Decision) *relayv1.R
 	for _, a := range spec.Accelerators {
 		accs = append(accs, &relayv1.Accelerator{
 			Kind: a.Kind, MemoryMib: a.MemoryMiB, Count: a.Count,
+			Exclusive: a.isExclusive(),
 		})
 	}
 	out := &relayv1.RunSpec{
@@ -224,6 +247,9 @@ func toSchedRequest(spec *RunSpecJSON) scheduler.Request {
 	for _, a := range spec.Accelerators {
 		req.AccelOptions = append(req.AccelOptions, scheduler.AccelRequest{
 			Kind: a.Kind, MemoryMiB: a.MemoryMiB, Count: int(a.Count),
+			// Older SDKs encoded whole-device requests as memory_mib=0
+			// without an explicit exclusivity field.
+			Exclusive: a.isExclusive(),
 		})
 	}
 	return req

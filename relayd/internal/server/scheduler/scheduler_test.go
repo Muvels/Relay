@@ -11,7 +11,7 @@ func rtx() *Machine {
 		OS: "linux", Arch: "amd64",
 		Executors: []string{"docker", "docker-cuda"},
 		CPUCores:  16, MemoryMiB: 64 * 1024,
-		Devices: []AccelDevice{{Kind: "cuda", Index: 0, MemoryMiB: 24 * 1024}},
+		Devices:      []AccelDevice{{Kind: "cuda", Index: 0, MemoryMiB: 24 * 1024}},
 		CachedImages: map[string]bool{},
 		Reserved:     Reservation{DeviceMemMiB: map[int]uint64{}},
 	}
@@ -21,10 +21,10 @@ func spark() *Machine {
 	return &Machine{
 		ID: "m_spark", Name: "dgx-spark", Online: true,
 		OS: "linux", Arch: "arm64",
-		Executors: []string{"docker", "docker-cuda"},
+		Executors:     []string{"docker", "docker-cuda"},
 		UnifiedMemory: true,
 		CPUCores:      20, MemoryMiB: 128 * 1024,
-		Devices: []AccelDevice{{Kind: "cuda", Index: 0, MemoryMiB: 128 * 1024}},
+		Devices:      []AccelDevice{{Kind: "cuda", Index: 0, MemoryMiB: 128 * 1024}},
 		CachedImages: map[string]bool{},
 		Reserved:     Reservation{DeviceMemMiB: map[int]uint64{}},
 	}
@@ -34,10 +34,10 @@ func mac() *Machine {
 	return &Machine{
 		ID: "m_mac", Name: "macbook", Online: true,
 		OS: "darwin", Arch: "arm64",
-		Executors: []string{"docker", "native-mps"},
+		Executors:     []string{"docker", "native-mps"},
 		UnifiedMemory: true,
 		CPUCores:      12, MemoryMiB: 48 * 1024,
-		Devices: []AccelDevice{{Kind: "mps", Index: 0, MemoryMiB: 48 * 1024}},
+		Devices:      []AccelDevice{{Kind: "mps", Index: 0, MemoryMiB: 48 * 1024}},
 		CachedImages: map[string]bool{},
 		Reserved:     Reservation{DeviceMemMiB: map[int]uint64{}},
 	}
@@ -188,6 +188,41 @@ func TestWholeDeviceReservationWhenNoMemoryGiven(t *testing.T) {
 	}
 }
 
+func TestExplicitSharedReservationAllowsPacking(t *testing.T) {
+	m := rtx()
+	req := Request{AccelOptions: []AccelRequest{{
+		Kind: "cuda", MemoryMiB: 8 * 1024, Count: 1, Exclusive: false,
+	}}}
+	d, _ := Place(req, []*Machine{m})
+	if d == nil || d.ReserveDeviceMiB[0] != 8*1024 {
+		t.Fatalf("shared request must reserve only its VRAM budget: %+v", d)
+	}
+	m.Reserved.DeviceMemMiB[0] = d.ReserveDeviceMiB[0]
+	if d2, _ := Place(req, []*Machine{m}); d2 == nil || d2.DeviceIndices[0] != 0 {
+		t.Fatalf("second shared request should pack onto the same GPU: %+v", d2)
+	}
+}
+
+func TestExplicitExclusiveMinimumNeedsEmptyDevice(t *testing.T) {
+	m := rtx()
+	req := Request{AccelOptions: []AccelRequest{{
+		Kind: "cuda", MemoryMiB: 8 * 1024, Count: 1, Exclusive: true,
+	}}}
+	d, _ := Place(req, []*Machine{m})
+	if d == nil || d.ReserveDeviceMiB[0] != 24*1024 {
+		t.Fatalf("exclusive request must reserve the whole selected device: %+v", d)
+	}
+	m.Reserved.DeviceMemMiB[0] = 1
+	if d2, _ := Place(req, []*Machine{m}); d2 != nil {
+		t.Fatalf("exclusive request landed on a shared device: %+v", d2)
+	}
+	m.Reserved.DeviceMemMiB[0] = 0
+	m.Devices[0].MemoryMiB = 4 * 1024
+	if d2, _ := Place(req, []*Machine{m}); d2 != nil {
+		t.Fatalf("exclusive request ignored its minimum VRAM: %+v", d2)
+	}
+}
+
 func TestCpuAdmission(t *testing.T) {
 	m := rtx()
 	m.Reserved.CPUs = 12
@@ -211,6 +246,24 @@ func TestUnifiedWholeDeviceIsExclusive(t *testing.T) {
 	m.Reserved.DeviceMemMiB[0] = d.ReserveDeviceMiB[0]
 	if d2, _ := Place(req, []*Machine{m}); d2 != nil {
 		t.Fatal("second any-GPU job must queue on unified silicon")
+	}
+}
+
+func TestUnifiedExplicitExclusiveReservesRemainingPool(t *testing.T) {
+	m := spark()
+	req := Request{AccelOptions: []AccelRequest{{
+		Kind: "cuda", MemoryMiB: 24 * 1024, Count: 1, Exclusive: true,
+	}}}
+	d, _ := Place(req, []*Machine{m})
+	if d == nil || d.ReserveDeviceMiB[0] != 128*1024 {
+		t.Fatalf("exclusive unified request must reserve the remaining pool: %+v", d)
+	}
+
+	shared := req
+	shared.AccelOptions[0].Exclusive = false
+	d, _ = Place(shared, []*Machine{m})
+	if d == nil || d.ReserveDeviceMiB[0] != 24*1024 {
+		t.Fatalf("shared unified request must reserve only its budget: %+v", d)
 	}
 }
 

@@ -85,31 +85,49 @@ def format_mib(mib: int) -> str:
 
 @dataclass(frozen=True)
 class Accelerator:
-    """Base for accelerator requirements. Memory is a scheduler reservation,
-    not a hardware-enforced partition."""
+    """Base for accelerator requirements. Memory is a minimum device size;
+    for shared requests it is also the fixed scheduler reservation, not a
+    hardware-enforced partition. Exclusive requests reserve every selected
+    device."""
 
     memory_mib: int = 0
     count: int = 1
+    exclusive: bool = True
 
     kind: str = field(default="", init=False)
 
     def describe(self) -> str:
         mem = f" ≥{format_mib(self.memory_mib)}" if self.memory_mib else ""
         cnt = f" x{self.count}" if self.count != 1 else ""
-        return f"{self.kind.upper()}{mem}{cnt}"
+        mode = " exclusive" if self.exclusive else " shared"
+        return f"{self.kind.upper()}{mem}{cnt}{mode}"
 
 
 @dataclass(frozen=True)
 class CUDA(Accelerator):
     kind: str = field(default="cuda", init=False)
 
-    def __init__(self, memory: Union[str, int, None] = None, count: int = 1):
-        object.__setattr__(
-            self, "memory_mib", parse_memory(memory, what="CUDA memory") if memory else 0
+    def __init__(self, memory: Union[str, int, None] = None, count: int = 1,
+                 *, exclusive: bool = True):
+        memory_mib = (
+            parse_memory(memory, what="CUDA memory") if memory is not None else 0
         )
         if count < 1:
             raise SpecError(f"CUDA count={count} must be >= 1")
+        if not isinstance(exclusive, bool):
+            raise SpecError(
+                f"CUDA exclusive={exclusive!r} must be true or false"
+            )
+        # GPU access is exclusive by default. Sharing is an explicit opt-in
+        # and needs a fixed VRAM budget so the scheduler can safely pack work.
+        if not exclusive and memory_mib == 0:
+            raise SpecError(
+                "CUDA exclusive=False needs a memory reservation, e.g. "
+                'relay.GPU(memory="24GB", exclusive=False)'
+            )
+        object.__setattr__(self, "memory_mib", memory_mib)
         object.__setattr__(self, "count", count)
+        object.__setattr__(self, "exclusive", exclusive)
         object.__setattr__(self, "kind", "cuda")
 
 
@@ -120,15 +138,27 @@ class MPS(Accelerator):
 
     kind: str = field(default="mps", init=False)
 
-    def __init__(self, memory: Union[str, int, None] = None):
-        object.__setattr__(
-            self, "memory_mib", parse_memory(memory, what="MPS memory") if memory else 0
+    def __init__(self, memory: Union[str, int, None] = None, *,
+                 exclusive: bool = True):
+        memory_mib = (
+            parse_memory(memory, what="MPS memory") if memory is not None else 0
         )
+        if not isinstance(exclusive, bool):
+            raise SpecError(f"MPS exclusive={exclusive!r} must be true or false")
+        if not exclusive and memory_mib == 0:
+            raise SpecError(
+                "MPS exclusive=False needs a memory reservation, e.g. "
+                'relay.MPS(memory="8GB", exclusive=False)'
+            )
+        object.__setattr__(self, "memory_mib", memory_mib)
         object.__setattr__(self, "count", 1)
+        object.__setattr__(self, "exclusive", exclusive)
         object.__setattr__(self, "kind", "mps")
 
 
-# `gpu="24GB"` and `gpu=relay.GPU(...)` are shorthand for a CUDA requirement.
+# `gpu="24GB"` and `gpu=relay.GPU(...)` are shorthand for an exclusive CUDA
+# requirement. Opt into safe reservation-ledger sharing explicitly with
+# `gpu=relay.GPU(memory="24GB", exclusive=False)`.
 # NVIDIA is what "gpu" means to virtually every training workload today.
 class GPU(CUDA):
     pass
