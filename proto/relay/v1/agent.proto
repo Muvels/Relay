@@ -185,6 +185,8 @@ message AcceleratorUsage {
   int32 index = 1;
   uint64 memory_used_mib = 2;
   double utilization = 3;  // 0..1, best-effort
+  bool memory_usage_available = 4;
+  bool utilization_available = 5;
 }
 
 message Heartbeat {
@@ -192,6 +194,11 @@ message Heartbeat {
   uint64 memory_used_mib = 2;
   repeated AcceleratorUsage accelerators = 3;
   uint64 disk_free_mib = 4;
+  uint64 disk_total_mib = 5;
+  int64 sampled_at_unix_ms = 6; // 0 = liveness heartbeat without telemetry
+  bool cpu_usage_available = 7;
+  bool memory_usage_available = 8;
+  bool disk_usage_available = 9;
 }
 
 message RunStatusUpdate {
@@ -220,7 +227,15 @@ message ServerMessage {
     RunAssignment assign = 2;
     CancelRun cancel = 3;
     ExecRequest exec = 4;
+    TelemetryRequest telemetry = 5;
   }
+}
+
+// A short lease keeps host monitoring demand-driven. The dashboard renews it
+// while the Machines page is visible; the agent stops sampling on expiry.
+message TelemetryRequest {
+  uint32 duration_s = 1;
+  uint32 interval_s = 2;
 }
 
 message ExecRequest {

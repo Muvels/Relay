@@ -80,6 +80,27 @@ func NewDockerExecutor(docker *dockerClient, workRoot string) *DockerExecutor {
 	return &DockerExecutor{docker: docker, workRoot: workRoot}
 }
 
+// cleanupStaleRunDirs removes only disposable per-run scratch from a previous
+// agent process. Relay does not resume work after an agent restart; the server
+// reconciles those runs as lost. Persistent volumes and cached native envs are
+// siblings of runs/ and are deliberately not touched.
+func cleanupStaleRunDirs(workRoot string) error {
+	runsRoot := filepath.Join(workRoot, "runs")
+	entries, err := os.ReadDir(runsRoot)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(runsRoot, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type runPaths struct {
 	runDir    string
 	workspace string
@@ -164,6 +185,7 @@ func (e *DockerExecutor) baseConfig(ctx context.Context, spec *relayv1.RunSpec, 
 		Env:        env,
 		Labels:     map[string]string{"dev.relay.run": runID},
 	}
+	cfg.HostConfig.LogConfig = cappedLogging()
 	// The workspace is a per-run scratch copy, so it mounts read-write.
 	// unlike M0 local mode, which mounts the user's real project read-only.
 	cfg.HostConfig.Binds = []string{
@@ -225,10 +247,12 @@ func (e *DockerExecutor) Run(ctx context.Context, spec *relayv1.RunSpec, ev Even
 	}
 
 	p, ok := e.prepare(ctx, spec, ev)
+	// prepare may have created and partially populated the directory before
+	// failing, so install cleanup before checking ok.
+	defer os.RemoveAll(p.runDir)
 	if !ok {
 		return
 	}
-	defer os.RemoveAll(p.runDir)
 
 	cfg, err := e.baseConfig(ctx, spec, p, ev)
 	if err != nil {

@@ -24,6 +24,7 @@ type Session struct {
 	cached        map[string]bool // image tags present on the machine
 	lastHeartbeat time.Time
 	lastUsage     *relayv1.Heartbeat
+	lastUsageAt   time.Time
 }
 
 func (s *Session) MarkCached(tag string) {
@@ -105,8 +106,11 @@ func (s *Session) Beat(hb *relayv1.Heartbeat) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastHeartbeat = time.Now()
-	if hb != nil {
+	// Empty heartbeats prove liveness without overwriting the last on-demand
+	// telemetry sample with zero values.
+	if hb != nil && hb.GetSampledAtUnixMs() > 0 {
 		s.lastUsage = hb
+		s.lastUsageAt = time.Now()
 	}
 }
 
@@ -116,10 +120,10 @@ func (s *Session) LastHeartbeat() time.Time {
 	return s.lastHeartbeat
 }
 
-func (s *Session) Usage() *relayv1.Heartbeat {
+func (s *Session) Usage() (*relayv1.Heartbeat, time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.lastUsage
+	return s.lastUsage, s.lastUsageAt
 }
 
 // TrySend queues a message without ever blocking the caller. A full or

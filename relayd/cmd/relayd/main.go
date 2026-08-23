@@ -61,11 +61,15 @@ func runServer(args []string) {
 	dataDir := fs.String("data-dir", home(".relay/server"), "state directory")
 	httpAddr := fs.String("http", "127.0.0.1:7460", "SDK/CLI HTTP listen address")
 	grpcAddr := fs.String("grpc", "0.0.0.0:7461", "agent gRPC listen address")
+	retainRuns := fs.Duration("retain-runs", server.DefaultRunTTL,
+		"how long to keep settled runs, their logs, and the blobs only they "+
+			"reference (0 = keep forever)")
 	_ = fs.Parse(args)
 
 	server.Version = version
 	srv, err := server.Start(server.Config{
 		DataDir: *dataDir, HTTPAddr: *httpAddr, GRPCAddr: *grpcAddr,
+		Retention: server.RetentionConfig{RunTTL: *retainRuns},
 	})
 	if err != nil {
 		slog.Error("server start failed", "err", err)
@@ -90,6 +94,8 @@ func runAgent(args []string) {
 	name := fs.String("name", "", "requested machine name (default: hostname)")
 	stateDir := fs.String("state-dir", home(".relay/agent"), "agent state directory")
 	dockerSock := fs.String("docker-sock", "", "docker socket path override")
+	imageTTL := fs.Duration("image-retention", agent.DefaultImageTTL,
+		"evict Relay-built images unused for this long (0 = keep forever)")
 	_ = fs.Parse(args)
 
 	joinToken := *join
@@ -125,6 +131,7 @@ func runAgent(args []string) {
 		Version:           version,
 		DockerSock:        *dockerSock,
 		JoinOnly:          *joinOnly,
+		ImageTTL:          *imageTTL,
 	})
 	if err != nil {
 		slog.Error("agent exited", "err", err)

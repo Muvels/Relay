@@ -44,9 +44,25 @@ The `relay` CLI ships with the Python SDK. `relayd` is the Go binary
 
 | Command | Does |
 |---|---|
-| `relayd server [--data-dir D] [--http A] [--grpc A]` | Control plane. Prints the API token; serves the dashboard at `/`. |
-| `relayd agent --join TOKEN@HOST:PORT#FP [--name N]` | Join a fleet and run the agent. `--join-only` registers and exits (used by the installer). |
+| `relayd server [--data-dir D] [--http A] [--grpc A] [--retain-runs D]` | Control plane. Prints the API token; serves the dashboard at `/`. |
+| `relayd agent --join TOKEN@HOST:PORT#FP [--name N] [--image-retention D]` | Join a fleet and run the agent. `--join-only` registers and exits (used by the installer). |
 | `relayd version` | Version. |
+
+### Staying bounded on an always-on machine
+
+Both daemons are idle-quiet: a connected agent with no work does not write to
+disk at all (heartbeats and liveness are held in memory, and run state is
+written only when it actually changes). What grows is history, so both sides
+garbage-collect it:
+
+| Flag | Default | Bounds |
+|---|---|---|
+| `relayd server --retain-runs` | `720h` (30 days) | Settled runs, their log files, and blobs nothing references any more. `0` keeps everything forever. Live runs and blobs a schedule still needs are never touched. |
+| `relayd agent --image-retention` | `336h` (14 days) | Relay-built `relay-img:*` images, evicted by time since **last use**, not since build. Images of live runs are exempt. `0` keeps everything forever. |
+
+Container logs are capped at 10 MiB × 3 files per run regardless, so a chatty
+long-lived service cannot fill the disk. Every line is still streamed to the
+server in full; the container-side copy is only a local tail buffer.
 
 ## Server resolution order (SDK + CLI)
 

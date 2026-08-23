@@ -140,6 +140,68 @@ func (c *dockerClient) ListImageTags(ctx context.Context, repoPrefix string) ([]
 	return tags, nil
 }
 
+// LocalImage is one locally stored image built or pulled by Relay.
+type LocalImage struct {
+	Tag       string
+	ID        string
+	CreatedAt time.Time
+	SizeBytes int64
+}
+
+// ListImages returns local images carrying a tag with the given repository
+// prefix, one entry per matching tag.
+func (c *dockerClient) ListImages(ctx context.Context, repoPrefix string) ([]LocalImage, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/images/json", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.errorFrom(resp)
+	}
+	var images []struct {
+		Id       string   `json:"Id"`
+		RepoTags []string `json:"RepoTags"`
+		Created  int64    `json:"Created"`
+		Size     int64    `json:"Size"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&images); err != nil {
+		return nil, err
+	}
+	var out []LocalImage
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if strings.HasPrefix(tag, repoPrefix) {
+				out = append(out, LocalImage{
+					Tag:       tag,
+					ID:        img.Id,
+					CreatedAt: time.Unix(img.Created, 0),
+					SizeBytes: img.Size,
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
+// ImageRemove deletes one image by reference. A 409 means a container still
+// uses it, which is not an error worth surfacing: the sweep simply skips it
+// and tries again next time.
+func (c *dockerClient) ImageRemove(ctx context.Context, ref string) error {
+	resp, err := c.do(ctx, http.MethodDelete, "/images/"+url.PathEscape(ref), nil, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNotFound:
+		return nil
+	default:
+		return c.errorFrom(resp)
+	}
+}
+
 type deviceRequest struct {
 	Driver       string     `json:"Driver,omitempty"`
 	Count        int        `json:"Count,omitempty"`
@@ -150,6 +212,28 @@ type deviceRequest struct {
 type portBinding struct {
 	HostIP   string `json:"HostIp,omitempty"`
 	HostPort string `json:"HostPort,omitempty"` // "" = random
+}
+
+// logConfig pins the container log driver instead of inheriting the
+// daemon's. Two reasons, both of which bite on a machine that stays up:
+//
+//   - json-file is unbounded by default, so one chatty service writes
+//     until the disk fills. Relay already streams every line to the
+//     server, so the container-side copy is only a local tail buffer and
+//     a small cap is the right size for it.
+//   - a host configured with the "none" driver would otherwise break log
+//     streaming entirely, since the agent reads lines back through the
+//     Docker logs API.
+type logConfig struct {
+	Type   string            `json:"Type"`
+	Config map[string]string `json:"Config,omitempty"`
+}
+
+// cappedLogging keeps at most 30 MiB of container-side log tail per run.
+func cappedLogging() logConfig {
+	return logConfig{Type: "json-file", Config: map[string]string{
+		"max-size": "10m", "max-file": "3",
+	}}
 }
 
 type containerConfig struct {
@@ -167,6 +251,7 @@ type containerConfig struct {
 		DeviceRequests []deviceRequest          `json:"DeviceRequests,omitempty"`
 		PortBindings   map[string][]portBinding `json:"PortBindings,omitempty"`
 		AutoRemove     bool                     `json:"AutoRemove"`
+		LogConfig      logConfig                `json:"LogConfig"`
 	} `json:"HostConfig"`
 }
 

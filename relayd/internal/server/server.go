@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -17,9 +18,10 @@ import (
 )
 
 type Config struct {
-	DataDir  string
-	GRPCAddr string // agents dial this
-	HTTPAddr string // SDK/CLI dial this
+	DataDir   string
+	GRPCAddr  string // agents dial this
+	HTTPAddr  string // SDK/CLI dial this
+	Retention RetentionConfig
 }
 
 type Server struct {
@@ -32,18 +34,37 @@ type Server struct {
 	cancel      context.CancelFunc
 }
 
+func chmodIfNeeded(path string, perm os.FileMode) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() == perm.Perm() {
+		return nil
+	}
+	return os.Chmod(path, perm)
+}
+
+func writeFileIfChanged(path string, data []byte, perm os.FileMode) error {
+	existing, err := os.ReadFile(path)
+	if err == nil && bytes.Equal(existing, data) {
+		return chmodIfNeeded(path, perm)
+	}
+	return os.WriteFile(path, data, perm)
+}
+
 func Start(cfg Config) (*Server, error) {
 	// 0700 throughout: the data dir holds every credential in the system.
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(cfg.DataDir, 0o700)
+	_ = chmodIfNeeded(cfg.DataDir, 0o700)
 	store, err := OpenStore(filepath.Join(cfg.DataDir, "relay.db"))
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	for _, suffix := range []string{"", "-wal", "-shm"} {
-		_ = os.Chmod(filepath.Join(cfg.DataDir, "relay.db"+suffix), 0o600)
+		_ = chmodIfNeeded(filepath.Join(cfg.DataDir, "relay.db"+suffix), 0o600)
 	}
 	blobs, err := NewBlobStore(filepath.Join(cfg.DataDir, "blobs"))
 	if err != nil {
@@ -58,7 +79,8 @@ func Start(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	// Convenience for same-machine CLI: readable only by the owner.
-	_ = os.WriteFile(filepath.Join(cfg.DataDir, "api_token"), []byte(apiToken+"\n"), 0o600)
+	_ = writeFileIfChanged(filepath.Join(cfg.DataDir, "api_token"),
+		[]byte(apiToken+"\n"), 0o600)
 
 	secrets, err := NewSecretStore(store, cfg.DataDir)
 	if err != nil {
@@ -75,6 +97,7 @@ func Start(cfg Config) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	StartJanitor(ctx, runs)
 	StartCron(ctx, store, runs)
+	StartRetention(ctx, store, logs, blobs, cfg.Retention)
 
 	cert, fingerprint, err := EnsureCert(cfg.DataDir)
 	if err != nil {
@@ -113,7 +136,8 @@ func Start(cfg Config) (*Server, error) {
 	}()
 
 	slog.Info("relayd server up",
-		"http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr, "data", cfg.DataDir)
+		"http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr, "data", cfg.DataDir,
+		"retention", cfg.Retention.describe())
 	return &Server{
 		cfg: cfg, store: store, grpcSrv: grpcSrv, httpSrv: httpSrv,
 		APIToken: apiToken, Fingerprint: fingerprint, cancel: cancel,

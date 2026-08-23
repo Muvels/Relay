@@ -1201,12 +1201,14 @@ func (x *AgentHello) GetActiveRunIds() []string {
 }
 
 type AcceleratorUsage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Index         int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
-	MemoryUsedMib uint64                 `protobuf:"varint,2,opt,name=memory_used_mib,json=memoryUsedMib,proto3" json:"memory_used_mib,omitempty"`
-	Utilization   float64                `protobuf:"fixed64,3,opt,name=utilization,proto3" json:"utilization,omitempty"` // 0..1, best-effort
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	Index                int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	MemoryUsedMib        uint64                 `protobuf:"varint,2,opt,name=memory_used_mib,json=memoryUsedMib,proto3" json:"memory_used_mib,omitempty"`
+	Utilization          float64                `protobuf:"fixed64,3,opt,name=utilization,proto3" json:"utilization,omitempty"` // 0..1, best-effort
+	MemoryUsageAvailable bool                   `protobuf:"varint,4,opt,name=memory_usage_available,json=memoryUsageAvailable,proto3" json:"memory_usage_available,omitempty"`
+	UtilizationAvailable bool                   `protobuf:"varint,5,opt,name=utilization_available,json=utilizationAvailable,proto3" json:"utilization_available,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *AcceleratorUsage) Reset() {
@@ -1260,14 +1262,33 @@ func (x *AcceleratorUsage) GetUtilization() float64 {
 	return 0
 }
 
+func (x *AcceleratorUsage) GetMemoryUsageAvailable() bool {
+	if x != nil {
+		return x.MemoryUsageAvailable
+	}
+	return false
+}
+
+func (x *AcceleratorUsage) GetUtilizationAvailable() bool {
+	if x != nil {
+		return x.UtilizationAvailable
+	}
+	return false
+}
+
 type Heartbeat struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CpuUsedCores  float64                `protobuf:"fixed64,1,opt,name=cpu_used_cores,json=cpuUsedCores,proto3" json:"cpu_used_cores,omitempty"`
-	MemoryUsedMib uint64                 `protobuf:"varint,2,opt,name=memory_used_mib,json=memoryUsedMib,proto3" json:"memory_used_mib,omitempty"`
-	Accelerators  []*AcceleratorUsage    `protobuf:"bytes,3,rep,name=accelerators,proto3" json:"accelerators,omitempty"`
-	DiskFreeMib   uint64                 `protobuf:"varint,4,opt,name=disk_free_mib,json=diskFreeMib,proto3" json:"disk_free_mib,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	CpuUsedCores         float64                `protobuf:"fixed64,1,opt,name=cpu_used_cores,json=cpuUsedCores,proto3" json:"cpu_used_cores,omitempty"`
+	MemoryUsedMib        uint64                 `protobuf:"varint,2,opt,name=memory_used_mib,json=memoryUsedMib,proto3" json:"memory_used_mib,omitempty"`
+	Accelerators         []*AcceleratorUsage    `protobuf:"bytes,3,rep,name=accelerators,proto3" json:"accelerators,omitempty"`
+	DiskFreeMib          uint64                 `protobuf:"varint,4,opt,name=disk_free_mib,json=diskFreeMib,proto3" json:"disk_free_mib,omitempty"`
+	DiskTotalMib         uint64                 `protobuf:"varint,5,opt,name=disk_total_mib,json=diskTotalMib,proto3" json:"disk_total_mib,omitempty"`
+	SampledAtUnixMs      int64                  `protobuf:"varint,6,opt,name=sampled_at_unix_ms,json=sampledAtUnixMs,proto3" json:"sampled_at_unix_ms,omitempty"` // 0 = liveness heartbeat without telemetry
+	CpuUsageAvailable    bool                   `protobuf:"varint,7,opt,name=cpu_usage_available,json=cpuUsageAvailable,proto3" json:"cpu_usage_available,omitempty"`
+	MemoryUsageAvailable bool                   `protobuf:"varint,8,opt,name=memory_usage_available,json=memoryUsageAvailable,proto3" json:"memory_usage_available,omitempty"`
+	DiskUsageAvailable   bool                   `protobuf:"varint,9,opt,name=disk_usage_available,json=diskUsageAvailable,proto3" json:"disk_usage_available,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -1326,6 +1347,41 @@ func (x *Heartbeat) GetDiskFreeMib() uint64 {
 		return x.DiskFreeMib
 	}
 	return 0
+}
+
+func (x *Heartbeat) GetDiskTotalMib() uint64 {
+	if x != nil {
+		return x.DiskTotalMib
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetSampledAtUnixMs() int64 {
+	if x != nil {
+		return x.SampledAtUnixMs
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetCpuUsageAvailable() bool {
+	if x != nil {
+		return x.CpuUsageAvailable
+	}
+	return false
+}
+
+func (x *Heartbeat) GetMemoryUsageAvailable() bool {
+	if x != nil {
+		return x.MemoryUsageAvailable
+	}
+	return false
+}
+
+func (x *Heartbeat) GetDiskUsageAvailable() bool {
+	if x != nil {
+		return x.DiskUsageAvailable
+	}
+	return false
 }
 
 type RunStatusUpdate struct {
@@ -1532,6 +1588,7 @@ type ServerMessage struct {
 	//	*ServerMessage_Assign
 	//	*ServerMessage_Cancel
 	//	*ServerMessage_Exec
+	//	*ServerMessage_Telemetry
 	Msg           isServerMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1610,6 +1667,15 @@ func (x *ServerMessage) GetExec() *ExecRequest {
 	return nil
 }
 
+func (x *ServerMessage) GetTelemetry() *TelemetryRequest {
+	if x != nil {
+		if x, ok := x.Msg.(*ServerMessage_Telemetry); ok {
+			return x.Telemetry
+		}
+	}
+	return nil
+}
+
 type isServerMessage_Msg interface {
 	isServerMessage_Msg()
 }
@@ -1630,6 +1696,10 @@ type ServerMessage_Exec struct {
 	Exec *ExecRequest `protobuf:"bytes,4,opt,name=exec,proto3,oneof"`
 }
 
+type ServerMessage_Telemetry struct {
+	Telemetry *TelemetryRequest `protobuf:"bytes,5,opt,name=telemetry,proto3,oneof"`
+}
+
 func (*ServerMessage_Hello) isServerMessage_Msg() {}
 
 func (*ServerMessage_Assign) isServerMessage_Msg() {}
@@ -1637,6 +1707,62 @@ func (*ServerMessage_Assign) isServerMessage_Msg() {}
 func (*ServerMessage_Cancel) isServerMessage_Msg() {}
 
 func (*ServerMessage_Exec) isServerMessage_Msg() {}
+
+func (*ServerMessage_Telemetry) isServerMessage_Msg() {}
+
+// A short lease keeps host monitoring demand-driven. The dashboard renews it
+// while the Machines page is visible; the agent stops sampling on expiry.
+type TelemetryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DurationS     uint32                 `protobuf:"varint,1,opt,name=duration_s,json=durationS,proto3" json:"duration_s,omitempty"`
+	IntervalS     uint32                 `protobuf:"varint,2,opt,name=interval_s,json=intervalS,proto3" json:"interval_s,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TelemetryRequest) Reset() {
+	*x = TelemetryRequest{}
+	mi := &file_relay_v1_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TelemetryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TelemetryRequest) ProtoMessage() {}
+
+func (x *TelemetryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_relay_v1_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TelemetryRequest.ProtoReflect.Descriptor instead.
+func (*TelemetryRequest) Descriptor() ([]byte, []int) {
+	return file_relay_v1_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *TelemetryRequest) GetDurationS() uint32 {
+	if x != nil {
+		return x.DurationS
+	}
+	return 0
+}
+
+func (x *TelemetryRequest) GetIntervalS() uint32 {
+	if x != nil {
+		return x.IntervalS
+	}
+	return 0
+}
 
 type ExecRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1649,7 +1775,7 @@ type ExecRequest struct {
 
 func (x *ExecRequest) Reset() {
 	*x = ExecRequest{}
-	mi := &file_relay_v1_agent_proto_msgTypes[19]
+	mi := &file_relay_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1661,7 +1787,7 @@ func (x *ExecRequest) String() string {
 func (*ExecRequest) ProtoMessage() {}
 
 func (x *ExecRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_relay_v1_agent_proto_msgTypes[19]
+	mi := &file_relay_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1674,7 +1800,7 @@ func (x *ExecRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecRequest.ProtoReflect.Descriptor instead.
 func (*ExecRequest) Descriptor() ([]byte, []int) {
-	return file_relay_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_relay_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ExecRequest) GetExecId() string {
@@ -1708,7 +1834,7 @@ type ServerHello struct {
 
 func (x *ServerHello) Reset() {
 	*x = ServerHello{}
-	mi := &file_relay_v1_agent_proto_msgTypes[20]
+	mi := &file_relay_v1_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1720,7 +1846,7 @@ func (x *ServerHello) String() string {
 func (*ServerHello) ProtoMessage() {}
 
 func (x *ServerHello) ProtoReflect() protoreflect.Message {
-	mi := &file_relay_v1_agent_proto_msgTypes[20]
+	mi := &file_relay_v1_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1733,7 +1859,7 @@ func (x *ServerHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerHello.ProtoReflect.Descriptor instead.
 func (*ServerHello) Descriptor() ([]byte, []int) {
-	return file_relay_v1_agent_proto_rawDescGZIP(), []int{20}
+	return file_relay_v1_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ServerHello) GetServerVersion() string {
@@ -1759,7 +1885,7 @@ type RunAssignment struct {
 
 func (x *RunAssignment) Reset() {
 	*x = RunAssignment{}
-	mi := &file_relay_v1_agent_proto_msgTypes[21]
+	mi := &file_relay_v1_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1771,7 +1897,7 @@ func (x *RunAssignment) String() string {
 func (*RunAssignment) ProtoMessage() {}
 
 func (x *RunAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_relay_v1_agent_proto_msgTypes[21]
+	mi := &file_relay_v1_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1784,7 +1910,7 @@ func (x *RunAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunAssignment.ProtoReflect.Descriptor instead.
 func (*RunAssignment) Descriptor() ([]byte, []int) {
-	return file_relay_v1_agent_proto_rawDescGZIP(), []int{21}
+	return file_relay_v1_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *RunAssignment) GetSpec() *RunSpec {
@@ -1803,7 +1929,7 @@ type CancelRun struct {
 
 func (x *CancelRun) Reset() {
 	*x = CancelRun{}
-	mi := &file_relay_v1_agent_proto_msgTypes[22]
+	mi := &file_relay_v1_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1815,7 +1941,7 @@ func (x *CancelRun) String() string {
 func (*CancelRun) ProtoMessage() {}
 
 func (x *CancelRun) ProtoReflect() protoreflect.Message {
-	mi := &file_relay_v1_agent_proto_msgTypes[22]
+	mi := &file_relay_v1_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1828,7 +1954,7 @@ func (x *CancelRun) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRun.ProtoReflect.Descriptor instead.
 func (*CancelRun) Descriptor() ([]byte, []int) {
-	return file_relay_v1_agent_proto_rawDescGZIP(), []int{22}
+	return file_relay_v1_agent_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CancelRun) GetRunId() string {
@@ -1847,7 +1973,7 @@ type BlobRequest struct {
 
 func (x *BlobRequest) Reset() {
 	*x = BlobRequest{}
-	mi := &file_relay_v1_agent_proto_msgTypes[23]
+	mi := &file_relay_v1_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1859,7 +1985,7 @@ func (x *BlobRequest) String() string {
 func (*BlobRequest) ProtoMessage() {}
 
 func (x *BlobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_relay_v1_agent_proto_msgTypes[23]
+	mi := &file_relay_v1_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1872,7 +1998,7 @@ func (x *BlobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlobRequest.ProtoReflect.Descriptor instead.
 func (*BlobRequest) Descriptor() ([]byte, []int) {
-	return file_relay_v1_agent_proto_rawDescGZIP(), []int{23}
+	return file_relay_v1_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *BlobRequest) GetSha256() string {
@@ -1892,7 +2018,7 @@ type BlobChunk struct {
 
 func (x *BlobChunk) Reset() {
 	*x = BlobChunk{}
-	mi := &file_relay_v1_agent_proto_msgTypes[24]
+	mi := &file_relay_v1_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1904,7 +2030,7 @@ func (x *BlobChunk) String() string {
 func (*BlobChunk) ProtoMessage() {}
 
 func (x *BlobChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_relay_v1_agent_proto_msgTypes[24]
+	mi := &file_relay_v1_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1917,7 +2043,7 @@ func (x *BlobChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlobChunk.ProtoReflect.Descriptor instead.
 func (*BlobChunk) Descriptor() ([]byte, []int) {
-	return file_relay_v1_agent_proto_rawDescGZIP(), []int{24}
+	return file_relay_v1_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *BlobChunk) GetSha256() string {
@@ -1945,7 +2071,7 @@ type BlobStat struct {
 
 func (x *BlobStat) Reset() {
 	*x = BlobStat{}
-	mi := &file_relay_v1_agent_proto_msgTypes[25]
+	mi := &file_relay_v1_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1957,7 +2083,7 @@ func (x *BlobStat) String() string {
 func (*BlobStat) ProtoMessage() {}
 
 func (x *BlobStat) ProtoReflect() protoreflect.Message {
-	mi := &file_relay_v1_agent_proto_msgTypes[25]
+	mi := &file_relay_v1_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1970,7 +2096,7 @@ func (x *BlobStat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlobStat.ProtoReflect.Descriptor instead.
 func (*BlobStat) Descriptor() ([]byte, []int) {
-	return file_relay_v1_agent_proto_rawDescGZIP(), []int{25}
+	return file_relay_v1_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *BlobStat) GetSha256() string {
@@ -2108,16 +2234,23 @@ const file_relay_v1_agent_proto_rawDesc = "" +
 	"machine_id\x18\x01 \x01(\tR\tmachineId\x128\n" +
 	"\tinventory\x18\x02 \x01(\v2\x1a.relay.v1.MachineInventoryR\tinventory\x12*\n" +
 	"\x11cached_image_tags\x18\x03 \x03(\tR\x0fcachedImageTags\x12$\n" +
-	"\x0eactive_run_ids\x18\x04 \x03(\tR\factiveRunIds\"r\n" +
+	"\x0eactive_run_ids\x18\x04 \x03(\tR\factiveRunIds\"\xdd\x01\n" +
 	"\x10AcceleratorUsage\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x05R\x05index\x12&\n" +
 	"\x0fmemory_used_mib\x18\x02 \x01(\x04R\rmemoryUsedMib\x12 \n" +
-	"\vutilization\x18\x03 \x01(\x01R\vutilization\"\xbd\x01\n" +
+	"\vutilization\x18\x03 \x01(\x01R\vutilization\x124\n" +
+	"\x16memory_usage_available\x18\x04 \x01(\bR\x14memoryUsageAvailable\x123\n" +
+	"\x15utilization_available\x18\x05 \x01(\bR\x14utilizationAvailable\"\xa8\x03\n" +
 	"\tHeartbeat\x12$\n" +
 	"\x0ecpu_used_cores\x18\x01 \x01(\x01R\fcpuUsedCores\x12&\n" +
 	"\x0fmemory_used_mib\x18\x02 \x01(\x04R\rmemoryUsedMib\x12>\n" +
 	"\faccelerators\x18\x03 \x03(\v2\x1a.relay.v1.AcceleratorUsageR\faccelerators\x12\"\n" +
-	"\rdisk_free_mib\x18\x04 \x01(\x04R\vdiskFreeMib\"\xc8\x01\n" +
+	"\rdisk_free_mib\x18\x04 \x01(\x04R\vdiskFreeMib\x12$\n" +
+	"\x0edisk_total_mib\x18\x05 \x01(\x04R\fdiskTotalMib\x12+\n" +
+	"\x12sampled_at_unix_ms\x18\x06 \x01(\x03R\x0fsampledAtUnixMs\x12.\n" +
+	"\x13cpu_usage_available\x18\a \x01(\bR\x11cpuUsageAvailable\x124\n" +
+	"\x16memory_usage_available\x18\b \x01(\bR\x14memoryUsageAvailable\x120\n" +
+	"\x14disk_usage_available\x18\t \x01(\bR\x12diskUsageAvailable\"\xc8\x01\n" +
 	"\x0fRunStatusUpdate\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12(\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x12.relay.v1.RunStateR\x05state\x12\x16\n" +
@@ -2132,13 +2265,19 @@ const file_relay_v1_agent_proto_rawDesc = "" +
 	"\x06stderr\x18\x03 \x01(\bR\x06stderr\"J\n" +
 	"\bLogBatch\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12'\n" +
-	"\x05lines\x18\x02 \x03(\v2\x11.relay.v1.LogLineR\x05lines\"\xd4\x01\n" +
+	"\x05lines\x18\x02 \x03(\v2\x11.relay.v1.LogLineR\x05lines\"\x90\x02\n" +
 	"\rServerMessage\x12-\n" +
 	"\x05hello\x18\x01 \x01(\v2\x15.relay.v1.ServerHelloH\x00R\x05hello\x121\n" +
 	"\x06assign\x18\x02 \x01(\v2\x17.relay.v1.RunAssignmentH\x00R\x06assign\x12-\n" +
 	"\x06cancel\x18\x03 \x01(\v2\x13.relay.v1.CancelRunH\x00R\x06cancel\x12+\n" +
-	"\x04exec\x18\x04 \x01(\v2\x15.relay.v1.ExecRequestH\x00R\x04execB\x05\n" +
-	"\x03msg\"W\n" +
+	"\x04exec\x18\x04 \x01(\v2\x15.relay.v1.ExecRequestH\x00R\x04exec\x12:\n" +
+	"\ttelemetry\x18\x05 \x01(\v2\x1a.relay.v1.TelemetryRequestH\x00R\ttelemetryB\x05\n" +
+	"\x03msg\"P\n" +
+	"\x10TelemetryRequest\x12\x1d\n" +
+	"\n" +
+	"duration_s\x18\x01 \x01(\rR\tdurationS\x12\x1d\n" +
+	"\n" +
+	"interval_s\x18\x02 \x01(\rR\tintervalS\"W\n" +
 	"\vExecRequest\x12\x17\n" +
 	"\aexec_id\x18\x01 \x01(\tR\x06execId\x12\x12\n" +
 	"\x04argv\x18\x02 \x03(\tR\x04argv\x12\x1b\n" +
@@ -2194,7 +2333,7 @@ func file_relay_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_relay_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_relay_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_relay_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_relay_v1_agent_proto_goTypes = []any{
 	(RunState)(0),               // 0: relay.v1.RunState
 	(*Accelerator)(nil),         // 1: relay.v1.Accelerator
@@ -2216,25 +2355,26 @@ var file_relay_v1_agent_proto_goTypes = []any{
 	(*LogLine)(nil),             // 17: relay.v1.LogLine
 	(*LogBatch)(nil),            // 18: relay.v1.LogBatch
 	(*ServerMessage)(nil),       // 19: relay.v1.ServerMessage
-	(*ExecRequest)(nil),         // 20: relay.v1.ExecRequest
-	(*ServerHello)(nil),         // 21: relay.v1.ServerHello
-	(*RunAssignment)(nil),       // 22: relay.v1.RunAssignment
-	(*CancelRun)(nil),           // 23: relay.v1.CancelRun
-	(*BlobRequest)(nil),         // 24: relay.v1.BlobRequest
-	(*BlobChunk)(nil),           // 25: relay.v1.BlobChunk
-	(*BlobStat)(nil),            // 26: relay.v1.BlobStat
-	nil,                         // 27: relay.v1.RunSpec.VolumesEntry
-	nil,                         // 28: relay.v1.NativeEnv.EnvEntry
-	nil,                         // 29: relay.v1.SecretsResponse.ValuesEntry
+	(*TelemetryRequest)(nil),    // 20: relay.v1.TelemetryRequest
+	(*ExecRequest)(nil),         // 21: relay.v1.ExecRequest
+	(*ServerHello)(nil),         // 22: relay.v1.ServerHello
+	(*RunAssignment)(nil),       // 23: relay.v1.RunAssignment
+	(*CancelRun)(nil),           // 24: relay.v1.CancelRun
+	(*BlobRequest)(nil),         // 25: relay.v1.BlobRequest
+	(*BlobChunk)(nil),           // 26: relay.v1.BlobChunk
+	(*BlobStat)(nil),            // 27: relay.v1.BlobStat
+	nil,                         // 28: relay.v1.RunSpec.VolumesEntry
+	nil,                         // 29: relay.v1.NativeEnv.EnvEntry
+	nil,                         // 30: relay.v1.SecretsResponse.ValuesEntry
 }
 var file_relay_v1_agent_proto_depIdxs = []int32{
 	1,  // 0: relay.v1.Resources.accelerator_options:type_name -> relay.v1.Accelerator
 	3,  // 1: relay.v1.MachineInventory.accelerators:type_name -> relay.v1.DetectedAccelerator
 	2,  // 2: relay.v1.RunSpec.resources:type_name -> relay.v1.Resources
-	27, // 3: relay.v1.RunSpec.volumes:type_name -> relay.v1.RunSpec.VolumesEntry
+	28, // 3: relay.v1.RunSpec.volumes:type_name -> relay.v1.RunSpec.VolumesEntry
 	6,  // 4: relay.v1.RunSpec.native_env:type_name -> relay.v1.NativeEnv
-	28, // 5: relay.v1.NativeEnv.env:type_name -> relay.v1.NativeEnv.EnvEntry
-	29, // 6: relay.v1.SecretsResponse.values:type_name -> relay.v1.SecretsResponse.ValuesEntry
+	29, // 5: relay.v1.NativeEnv.env:type_name -> relay.v1.NativeEnv.EnvEntry
+	30, // 6: relay.v1.SecretsResponse.values:type_name -> relay.v1.SecretsResponse.ValuesEntry
 	4,  // 7: relay.v1.RegisterRequest.inventory:type_name -> relay.v1.MachineInventory
 	13, // 8: relay.v1.AgentMessage.hello:type_name -> relay.v1.AgentHello
 	15, // 9: relay.v1.AgentMessage.heartbeat:type_name -> relay.v1.Heartbeat
@@ -2245,28 +2385,29 @@ var file_relay_v1_agent_proto_depIdxs = []int32{
 	14, // 14: relay.v1.Heartbeat.accelerators:type_name -> relay.v1.AcceleratorUsage
 	0,  // 15: relay.v1.RunStatusUpdate.state:type_name -> relay.v1.RunState
 	17, // 16: relay.v1.LogBatch.lines:type_name -> relay.v1.LogLine
-	21, // 17: relay.v1.ServerMessage.hello:type_name -> relay.v1.ServerHello
-	22, // 18: relay.v1.ServerMessage.assign:type_name -> relay.v1.RunAssignment
-	23, // 19: relay.v1.ServerMessage.cancel:type_name -> relay.v1.CancelRun
-	20, // 20: relay.v1.ServerMessage.exec:type_name -> relay.v1.ExecRequest
-	5,  // 21: relay.v1.RunAssignment.spec:type_name -> relay.v1.RunSpec
-	9,  // 22: relay.v1.AgentService.Register:input_type -> relay.v1.RegisterRequest
-	11, // 23: relay.v1.AgentService.Session:input_type -> relay.v1.AgentMessage
-	24, // 24: relay.v1.AgentService.HasBlob:input_type -> relay.v1.BlobRequest
-	24, // 25: relay.v1.AgentService.DownloadBlob:input_type -> relay.v1.BlobRequest
-	25, // 26: relay.v1.AgentService.UploadBlob:input_type -> relay.v1.BlobChunk
-	7,  // 27: relay.v1.AgentService.GetSecrets:input_type -> relay.v1.SecretsRequest
-	10, // 28: relay.v1.AgentService.Register:output_type -> relay.v1.RegisterResponse
-	19, // 29: relay.v1.AgentService.Session:output_type -> relay.v1.ServerMessage
-	26, // 30: relay.v1.AgentService.HasBlob:output_type -> relay.v1.BlobStat
-	25, // 31: relay.v1.AgentService.DownloadBlob:output_type -> relay.v1.BlobChunk
-	26, // 32: relay.v1.AgentService.UploadBlob:output_type -> relay.v1.BlobStat
-	8,  // 33: relay.v1.AgentService.GetSecrets:output_type -> relay.v1.SecretsResponse
-	28, // [28:34] is the sub-list for method output_type
-	22, // [22:28] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	22, // 17: relay.v1.ServerMessage.hello:type_name -> relay.v1.ServerHello
+	23, // 18: relay.v1.ServerMessage.assign:type_name -> relay.v1.RunAssignment
+	24, // 19: relay.v1.ServerMessage.cancel:type_name -> relay.v1.CancelRun
+	21, // 20: relay.v1.ServerMessage.exec:type_name -> relay.v1.ExecRequest
+	20, // 21: relay.v1.ServerMessage.telemetry:type_name -> relay.v1.TelemetryRequest
+	5,  // 22: relay.v1.RunAssignment.spec:type_name -> relay.v1.RunSpec
+	9,  // 23: relay.v1.AgentService.Register:input_type -> relay.v1.RegisterRequest
+	11, // 24: relay.v1.AgentService.Session:input_type -> relay.v1.AgentMessage
+	25, // 25: relay.v1.AgentService.HasBlob:input_type -> relay.v1.BlobRequest
+	25, // 26: relay.v1.AgentService.DownloadBlob:input_type -> relay.v1.BlobRequest
+	26, // 27: relay.v1.AgentService.UploadBlob:input_type -> relay.v1.BlobChunk
+	7,  // 28: relay.v1.AgentService.GetSecrets:input_type -> relay.v1.SecretsRequest
+	10, // 29: relay.v1.AgentService.Register:output_type -> relay.v1.RegisterResponse
+	19, // 30: relay.v1.AgentService.Session:output_type -> relay.v1.ServerMessage
+	27, // 31: relay.v1.AgentService.HasBlob:output_type -> relay.v1.BlobStat
+	26, // 32: relay.v1.AgentService.DownloadBlob:output_type -> relay.v1.BlobChunk
+	27, // 33: relay.v1.AgentService.UploadBlob:output_type -> relay.v1.BlobStat
+	8,  // 34: relay.v1.AgentService.GetSecrets:output_type -> relay.v1.SecretsResponse
+	29, // [29:35] is the sub-list for method output_type
+	23, // [23:29] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_relay_v1_agent_proto_init() }
@@ -2286,6 +2427,7 @@ func file_relay_v1_agent_proto_init() {
 		(*ServerMessage_Assign)(nil),
 		(*ServerMessage_Cancel)(nil),
 		(*ServerMessage_Exec)(nil),
+		(*ServerMessage_Telemetry)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2293,7 +2435,7 @@ func file_relay_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_relay_v1_agent_proto_rawDesc), len(file_relay_v1_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   29,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

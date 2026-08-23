@@ -10,7 +10,37 @@ export interface Machine {
   cpu_cores: number;
   memory_mib: number;
   unified_memory: boolean;
-  accelerators: { kind?: string; name?: string; memory_mib?: number }[];
+  executors: string[];
+  accelerators: {
+    kind?: string;
+    name?: string;
+    memory_mib?: number;
+    index?: number;
+    memory_unreliable?: boolean;
+  }[];
+  reserved: {
+    cpu_cores: number;
+    memory_mib: number;
+    accelerator_memory_mib: Record<string, number>;
+    active_runs: number;
+  };
+  usage?: {
+    sampled_at: string;
+    cpu_used_cores: number;
+    memory_used_mib: number;
+    disk_free_mib: number;
+    disk_total_mib: number;
+    cpu_usage_available: boolean;
+    memory_usage_available: boolean;
+    disk_usage_available: boolean;
+    accelerators: {
+      index: number;
+      memory_used_mib: number;
+      utilization: number;
+      memory_usage_available: boolean;
+      utilization_available: boolean;
+    }[];
+  };
   last_seen: string;
 }
 
@@ -81,11 +111,16 @@ export async function fetchRun(id: string): Promise<Run> {
   return api<Run>(`/v1/runs/${encodeURIComponent(id)}`);
 }
 
-export async function fetchSnapshot(): Promise<Snapshot> {
+export async function fetchSnapshot(options?: {
+  machineTelemetry?: boolean;
+}): Promise<Snapshot> {
+  const machinesPath = options?.machineTelemetry
+    ? "/v1/machines?telemetry=1"
+    : "/v1/machines";
   const [health, machines, runs, services, secrets, schedules] =
     await Promise.all([
       api<{ version: string }>("/v1/health"),
-      api<{ machines: Machine[] }>("/v1/machines"),
+      api<{ machines: Machine[] }>(machinesPath),
       api<{ runs: Run[] }>("/v1/runs?limit=100"),
       api<{ services: Run[] }>("/v1/services"),
       api<{ secrets: string[] }>("/v1/secrets"),

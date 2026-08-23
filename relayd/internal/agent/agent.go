@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -38,7 +39,8 @@ type Config struct {
 	StateDir          string
 	Version           string
 	DockerSock        string
-	JoinOnly          bool // register, persist credentials, exit
+	JoinOnly          bool          // register, persist credentials, exit
+	ImageTTL          time.Duration // evict Relay images unused this long (0 = never)
 }
 
 type credentials struct {
@@ -56,9 +58,14 @@ type Agent struct {
 	docker *dockerClient
 	exec   *DockerExecutor
 	native *NativeExecutor
+	usage  *usageCollector
+	images *imageCache
 
 	mu     sync.Mutex
 	active map[string]context.CancelFunc
+	// activeImage keeps a live run's image off the eviction list even when
+	// the run has not created its container yet.
+	activeImage map[string]string
 	// statusCh is RELIABLE: sends block rather than drop because a lost terminal
 	// status would strand a run forever. logCh is lossy by design.
 	statusCh chan *relayv1.AgentMessage
@@ -82,12 +89,15 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	a := &Agent{
-		cfg:        cfg,
-		docker:     newDockerClient(cfg.DockerSock),
-		active:     map[string]context.CancelFunc{},
-		statusCh:   make(chan *relayv1.AgentMessage, 1024),
-		logCh:      make(chan *relayv1.AgentMessage, 1024),
-		unreported: map[string]int{},
+		cfg:         cfg,
+		docker:      newDockerClient(cfg.DockerSock),
+		usage:       newUsageCollector(),
+		images:      newImageCache(cfg.StateDir),
+		active:      map[string]context.CancelFunc{},
+		activeImage: map[string]string{},
+		statusCh:    make(chan *relayv1.AgentMessage, 1024),
+		logCh:       make(chan *relayv1.AgentMessage, 1024),
+		unreported:  map[string]int{},
 	}
 	a.exec = NewDockerExecutor(a.docker, cfg.StateDir)
 	a.native = NewNativeExecutor(cfg.StateDir)
@@ -113,6 +123,9 @@ func Run(ctx context.Context, cfg Config) error {
 		_, active := a.active[runID]
 		return active
 	})
+	if err := cleanupStaleRunDirs(cfg.StateDir); err != nil {
+		slog.Warn("could not clean stale run scratch", "err", err)
+	}
 
 	if err := a.join(ctx); err != nil {
 		return err
@@ -124,14 +137,24 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	slog.Info("agent ready", "machine", a.creds.Name, "server", cfg.ServerAddr)
 
+	startImageSweeper(ctx, a.docker, a.images, cfg.ImageTTL, a.activeImageTags)
+
 	// The reconnect loop uses exponential backoff, jitter, and a cap, which T3's
 	// connector supervisor lacked.
 	backoff := 500 * time.Millisecond
 	const maxBackoff = 30 * time.Second
+	// A session that stayed up this long proves the server is healthy, so the
+	// next blip starts from a fast retry again. Without this, one bad hour
+	// leaves a machine reconnecting at the 30s cap for the rest of its life.
+	const healthySession = time.Minute
 	for ctx.Err() == nil {
+		startedAt := time.Now()
 		err := a.session(ctx)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if time.Since(startedAt) >= healthySession {
+			backoff = 500 * time.Millisecond
 		}
 		sleep := backoff + time.Duration(rand.Int64N(int64(backoff/2)))
 		slog.Warn("session ended; reconnecting", "err", err, "in", sleep.Round(time.Millisecond))
@@ -148,6 +171,17 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 	return nil
+}
+
+// activeImageTags is the eviction exemption set: images of runs live here now.
+func (a *Agent) activeImageTags() map[string]bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tags := make(map[string]bool, len(a.activeImage))
+	for _, tag := range a.activeImage {
+		tags[tag] = true
+	}
+	return tags
 }
 
 func (a *Agent) loadCreds() {
@@ -306,13 +340,97 @@ func (a *Agent) session(ctx context.Context) error {
 	a.persistSeenCert()
 	slog.Info("connected", "server_version", hello.GetServerVersion())
 
+	// The inventory above is a one-shot snapshot, and nothing re-detects
+	// while a session stays healthy, which on a server machine means months.
+	// A box that starts the agent and Docker concurrently at boot can
+	// therefore advertise "no Docker, no CUDA" indefinitely and never be
+	// scheduled a GPU job. Watch for the capability actually flipping and
+	// end the session; the reconnect re-detects and updates the server row.
+	go a.watchDockerAvailability(sctx, cancel,
+		slices.Contains(inv.GetExecutors(), "docker"))
+
+	type telemetryLease struct {
+		duration time.Duration
+		interval time.Duration
+	}
+	telemetryConfig := make(chan telemetryLease, 1)
+	telemetryRequests := make(chan struct{}, 1)
+	telemetrySamples := make(chan *relayv1.Heartbeat, 1)
+	go func() {
+		for {
+			select {
+			case <-sctx.Done():
+				return
+			case <-telemetryRequests:
+				sample := a.usage.Sample(sctx)
+				select {
+				case telemetrySamples <- sample:
+				default: // keep at most one fresh sample queued for the writer
+				}
+			}
+		}
+	}()
+
 	// Writer: heartbeats + executor events. Status messages take priority
 	// over logs; a failed status Send is requeued, never lost.
 	writerDone := make(chan error, 1)
 	go func() {
 		ticker := time.NewTicker(heartbeatEvery)
 		defer ticker.Stop()
+		telemetryTimer := time.NewTimer(time.Hour)
+		if !telemetryTimer.Stop() {
+			<-telemetryTimer.C
+		}
+		defer telemetryTimer.Stop()
+		var telemetryTimerC <-chan time.Time
+		var telemetryUntil time.Time
+		telemetryEvery := 3 * time.Second
+		resetTelemetryTimer := func(after time.Duration) {
+			if !telemetryTimer.Stop() {
+				select {
+				case <-telemetryTimer.C:
+				default:
+				}
+			}
+			telemetryTimer.Reset(after)
+			telemetryTimerC = telemetryTimer.C
+		}
+		requestTelemetrySample := func() {
+			select {
+			case telemetryRequests <- struct{}{}:
+			default:
+			}
+		}
+		var sendLogs func(*relayv1.AgentMessage) error
 		sendStatus := func(msg *relayv1.AgentMessage) error {
+			// Executors join their log follower before reporting a terminal state.
+			// Flush those already-queued lines first so clients never observe a
+			// finished run whose final log batch is still behind the status.
+			if st := msg.GetRunStatus(); st != nil {
+				switch st.GetState() {
+				case relayv1.RunState_RUN_SUCCEEDED, relayv1.RunState_RUN_FAILED,
+					relayv1.RunState_RUN_ERROR, relayv1.RunState_RUN_CANCELED,
+					relayv1.RunState_RUN_LOST:
+					// Drain the WHOLE queue, not one batch: sendLogs stops at
+					// 128 lines, so a run whose last output exceeds that would
+					// otherwise have its terminal status overtake the rest,
+					// and the server closes followers on that status.
+				flush:
+					for {
+						select {
+						case pendingLogs := <-a.logCh:
+							if err := sendLogs(pendingLogs); err != nil {
+								a.mu.Lock()
+								a.pendingStatus = append(a.pendingStatus, msg)
+								a.mu.Unlock()
+								return err
+							}
+						default:
+							break flush
+						}
+					}
+				}
+			}
 			if err := stream.Send(msg); err != nil {
 				a.mu.Lock()
 				a.pendingStatus = append(a.pendingStatus, msg)
@@ -327,6 +445,48 @@ func (a *Agent) session(ctx context.Context) error {
 					a.unreported[st.GetRunId()]--
 				}
 				a.mu.Unlock()
+			}
+			return nil
+		}
+		// Coalesce log lines that are already queued into one message per run.
+		// This adds no timer or steady-state work, while turning output bursts
+		// into far fewer network and filesystem writes on the server.
+		sendLogs = func(first *relayv1.AgentMessage) error {
+			const maxLines = 128
+			batches := map[string][]*relayv1.LogLine{}
+			var runIDs []string
+			add := func(msg *relayv1.AgentMessage) {
+				logs := msg.GetLogs()
+				if logs == nil || len(logs.GetLines()) == 0 {
+					return
+				}
+				runID := logs.GetRunId()
+				if _, exists := batches[runID]; !exists {
+					runIDs = append(runIDs, runID)
+				}
+				batches[runID] = append(batches[runID], logs.GetLines()...)
+			}
+			add(first)
+			count := len(first.GetLogs().GetLines())
+			for count < maxLines {
+				select {
+				case msg := <-a.logCh:
+					if logs := msg.GetLogs(); logs != nil {
+						count += len(logs.GetLines())
+					}
+					add(msg)
+				default:
+					count = maxLines
+				}
+			}
+			for _, runID := range runIDs {
+				if err := stream.Send(&relayv1.AgentMessage{
+					Msg: &relayv1.AgentMessage_Logs{Logs: &relayv1.LogBatch{
+						RunId: runID, Lines: batches[runID],
+					}},
+				}); err != nil {
+					return err
+				}
 			}
 			return nil
 		}
@@ -358,7 +518,30 @@ func (a *Agent) session(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				if err := stream.Send(&relayv1.AgentMessage{
-					Msg: &relayv1.AgentMessage_Heartbeat{Heartbeat: a.usage()},
+					Msg: &relayv1.AgentMessage_Heartbeat{Heartbeat: &relayv1.Heartbeat{}},
+				}); err != nil {
+					writerDone <- err
+					return
+				}
+			case lease := <-telemetryConfig:
+				wasActive := telemetryTimerC != nil && time.Now().Before(telemetryUntil)
+				telemetryUntil = time.Now().Add(lease.duration)
+				telemetryEvery = lease.interval
+				if !wasActive {
+					a.usage.ResetCPU()
+					requestTelemetrySample()
+					resetTelemetryTimer(telemetryEvery)
+				}
+			case <-telemetryTimerC:
+				if !time.Now().Before(telemetryUntil) {
+					telemetryTimerC = nil
+					continue
+				}
+				requestTelemetrySample()
+				resetTelemetryTimer(telemetryEvery)
+			case sample := <-telemetrySamples:
+				if err := stream.Send(&relayv1.AgentMessage{
+					Msg: &relayv1.AgentMessage_Heartbeat{Heartbeat: sample},
 				}); err != nil {
 					writerDone <- err
 					return
@@ -369,7 +552,7 @@ func (a *Agent) session(ctx context.Context) error {
 					return
 				}
 			case msg := <-a.logCh:
-				if err := stream.Send(msg); err != nil {
+				if err := sendLogs(msg); err != nil {
 					writerDone <- err
 					return
 				}
@@ -408,6 +591,54 @@ func (a *Agent) session(ctx context.Context) error {
 			a.cancelRun(payload.Cancel.GetRunId())
 		case *relayv1.ServerMessage_Exec:
 			go a.runExec(ctx, payload.Exec)
+		case *relayv1.ServerMessage_Telemetry:
+			duration := time.Duration(payload.Telemetry.GetDurationS()) * time.Second
+			interval := time.Duration(payload.Telemetry.GetIntervalS()) * time.Second
+			if duration < 3*time.Second || duration > 30*time.Second {
+				duration = 8 * time.Second
+			}
+			if interval < 2*time.Second || interval > 10*time.Second {
+				interval = 3 * time.Second
+			}
+			lease := telemetryLease{duration: duration, interval: interval}
+			select {
+			case telemetryConfig <- lease:
+			default:
+				// Coalesce repeated dashboard renewals without blocking assignments.
+				select {
+				case <-telemetryConfig:
+				default:
+				}
+				select {
+				case telemetryConfig <- lease:
+				default:
+				}
+			}
+		}
+	}
+}
+
+// watchDockerAvailability ends the session when Docker appears or vanishes,
+// which is the agent's only way to republish inventory: the Hello that
+// carries it is sent once per session.
+func (a *Agent) watchDockerAvailability(ctx context.Context, endSession context.CancelFunc, advertised bool) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			up := a.docker.Ping(pingCtx) == nil
+			cancel()
+			if up == advertised || ctx.Err() != nil {
+				continue
+			}
+			slog.Info("docker availability changed; reconnecting to "+
+				"refresh inventory", "docker_up", up)
+			endSession()
+			return
 		}
 	}
 }
@@ -502,14 +733,23 @@ func (a *Agent) startRun(root context.Context, spec *relayv1.RunSpec) {
 	}
 	rctx, cancel := context.WithCancel(root)
 	a.active[runID] = cancel
+	a.activeImage[runID] = spec.GetImageTag()
 	a.mu.Unlock()
+	// Recorded at start, not at completion: a long training run must count
+	// as "in use" the whole time it holds the image.
+	a.images.Touch(spec.GetImageTag())
 
 	slog.Info("run starting", "run", runID,
 		"function", spec.GetFunction(), "kind", spec.GetKind())
 	go func() {
 		defer func() {
+			// Touch again on the way out. A service that ran for two months
+			// would otherwise drop out of the exemption set carrying a
+			// two-month-old "last used", and be evicted on the next sweep.
+			a.images.Touch(spec.GetImageTag())
 			a.mu.Lock()
 			delete(a.active, runID)
+			delete(a.activeImage, runID)
 			a.mu.Unlock()
 			cancel()
 		}()
@@ -536,12 +776,6 @@ func (a *Agent) cancelRun(runID string) {
 		slog.Info("run canceled by server", "run", runID)
 		cancel()
 	}
-}
-
-func (a *Agent) usage() *relayv1.Heartbeat {
-	// M1 heartbeat is liveness only; M2 fills in real utilization for the
-	// scheduler's tiebreaks (reservations, not usage, drive admission).
-	return &relayv1.Heartbeat{}
 }
 
 // ------------------------------------------------------------ Events

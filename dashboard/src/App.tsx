@@ -28,10 +28,17 @@ export default function App() {
   const [offline, setOffline] = useState(false);
   const [tab, setTab] = useState<Tab>("Apps");
   const [drawer, setDrawer] = useState<DrawerTarget | null>(null);
+  const [pageVisible, setPageVisible] = useState(
+    () => document.visibilityState === "visible",
+  );
 
   const refresh = useCallback(async () => {
     try {
-      setSnapshot(await fetchSnapshot());
+      setSnapshot(
+        await fetchSnapshot({
+          machineTelemetry: tab === "Machines" && pageVisible,
+        }),
+      );
       setOffline(false);
     } catch (err) {
       if (err instanceof Unauthorized) {
@@ -41,14 +48,21 @@ export default function App() {
         setOffline(true);
       }
     }
+  }, [pageVisible, tab]);
+
+  useEffect(() => {
+    const onVisibilityChange = () =>
+      setPageVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
   }, []);
 
   useEffect(() => {
-    if (!authed) return;
+    if (!authed || !pageVisible) return;
     refresh();
     const id = setInterval(refresh, 3000);
     return () => clearInterval(id);
-  }, [authed, refresh]);
+  }, [authed, pageVisible, refresh]);
 
   // "/" focuses the Apps search, Modal-style.
   useEffect(() => {
@@ -137,6 +151,7 @@ export default function App() {
           initial={[...(snapshot?.runs ?? []), ...(snapshot?.services ?? [])].find(
             (r) => r.id === drawer.id,
           )}
+          visible={pageVisible}
           onClose={() => setDrawer(null)}
         />
       )}

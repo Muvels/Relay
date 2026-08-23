@@ -270,17 +270,32 @@ func (a *httpAPI) cancelRun(w http.ResponseWriter, r *http.Request) {
 // lines until the run finishes (or immediately when follow=0).
 func (a *httpAPI) runLogs(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
-	if _, err := a.store.GetRun(runID); errors.Is(err, ErrNotFound) {
+	run, err := a.store.GetRun(runID)
+	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "no run %s", runID)
 		return
 	}
+	// A settled run gets its backlog and nothing else, even under --follow.
+	// The run row is the only durable record of that, so a server restart
+	// must not turn `relay logs <old-run>` into a hang.
+	finished := err == nil && IsTerminal(run.State)
 	follow := r.URL.Query().Get("follow") != "0"
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 
-	backlog, live, cancel := a.logs.Subscribe(runID)
+	backlog, live, cancel := a.logs.Subscribe(runID, finished)
+	if live != nil {
+		// Re-read after subscribing. If the run settled in between, its
+		// Close already ran and will never close the channel we just took,
+		// so this follower would wait forever. Re-subscribing as finished
+		// also re-reads the backlog, which now holds the final lines.
+		if settled, gerr := a.store.GetRun(runID); gerr == nil && IsTerminal(settled.State) {
+			cancel()
+			backlog, live, cancel = a.logs.Subscribe(runID, true)
+		}
+	}
 	defer cancel()
 	for _, line := range backlog {
 		fmt.Fprintln(w, line)
@@ -436,11 +451,39 @@ func (a *httpAPI) listServices(w http.ResponseWriter, _ *http.Request) {
 
 // ------------------------------------------------------------ machines
 
-func (a *httpAPI) listMachines(w http.ResponseWriter, _ *http.Request) {
+func (a *httpAPI) listMachines(w http.ResponseWriter, r *http.Request) {
 	machines, err := a.store.ListMachines()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "%v", err)
 		return
+	}
+	// Capacity is intentionally derived from the same reservation ledger the
+	// scheduler uses for admission. It answers "what can Relay schedule now?"
+	// without presenting best-effort host/GPU telemetry as a hard guarantee.
+	ledger := a.runs.ledger()
+	type reservationJSON struct {
+		CPUCores             float64        `json:"cpu_cores"`
+		MemoryMiB            uint64         `json:"memory_mib"`
+		AcceleratorMemoryMiB map[int]uint64 `json:"accelerator_memory_mib"`
+		ActiveRuns           int            `json:"active_runs"`
+	}
+	type acceleratorUsageJSON struct {
+		Index                int32   `json:"index"`
+		MemoryUsedMiB        uint64  `json:"memory_used_mib"`
+		Utilization          float64 `json:"utilization"`
+		MemoryUsageAvailable bool    `json:"memory_usage_available"`
+		UtilizationAvailable bool    `json:"utilization_available"`
+	}
+	type usageJSON struct {
+		SampledAt            string                 `json:"sampled_at"`
+		CPUUsedCores         float64                `json:"cpu_used_cores"`
+		MemoryUsedMiB        uint64                 `json:"memory_used_mib"`
+		DiskFreeMiB          uint64                 `json:"disk_free_mib"`
+		DiskTotalMiB         uint64                 `json:"disk_total_mib"`
+		CPUUsageAvailable    bool                   `json:"cpu_usage_available"`
+		MemoryUsageAvailable bool                   `json:"memory_usage_available"`
+		DiskUsageAvailable   bool                   `json:"disk_usage_available"`
+		Accelerators         []acceleratorUsageJSON `json:"accelerators"`
 	}
 	type machineJSON struct {
 		ID           string          `json:"id"`
@@ -453,23 +496,71 @@ func (a *httpAPI) listMachines(w http.ResponseWriter, _ *http.Request) {
 		Unified      bool            `json:"unified_memory"`
 		Executors    json.RawMessage `json:"executors"`
 		Accelerators json.RawMessage `json:"accelerators"`
+		Reserved     reservationJSON `json:"reserved"`
+		Usage        *usageJSON      `json:"usage,omitempty"`
 		LastSeen     string          `json:"last_seen"`
 	}
+	wantTelemetry := r.URL.Query().Get("telemetry") == "1"
 	out := make([]machineJSON, 0, len(machines))
 	for _, m := range machines {
-		_, online := a.fleet.Get(m.ID)
+		session, online := a.fleet.Get(m.ID)
+		if online && wantTelemetry {
+			// A short renewable lease ensures collection stops shortly after the
+			// Machines page closes. The request and samples stay in memory only.
+			session.TrySend(&relayv1.ServerMessage{Msg: &relayv1.ServerMessage_Telemetry{
+				Telemetry: &relayv1.TelemetryRequest{DurationS: 8, IntervalS: 3},
+			}})
+		}
+		reserved := ledger[m.ID]
+		if reserved.DeviceMemMiB == nil {
+			reserved.DeviceMemMiB = map[int]uint64{}
+		}
 		rawOr := func(s string) json.RawMessage {
 			if s == "" || !json.Valid([]byte(s)) {
 				return json.RawMessage("[]")
 			}
 			return json.RawMessage(s)
 		}
+		var usage *usageJSON
+		if online {
+			if hb, receivedAt := session.Usage(); hb != nil && time.Since(receivedAt) < 12*time.Second {
+				usage = &usageJSON{
+					SampledAt:            receivedAt.UTC().Format(time.RFC3339),
+					CPUUsedCores:         hb.GetCpuUsedCores(),
+					MemoryUsedMiB:        hb.GetMemoryUsedMib(),
+					DiskFreeMiB:          hb.GetDiskFreeMib(),
+					DiskTotalMiB:         hb.GetDiskTotalMib(),
+					CPUUsageAvailable:    hb.GetCpuUsageAvailable(),
+					MemoryUsageAvailable: hb.GetMemoryUsageAvailable(),
+					DiskUsageAvailable:   hb.GetDiskUsageAvailable(),
+				}
+				for _, accelerator := range hb.GetAccelerators() {
+					usage.Accelerators = append(usage.Accelerators, acceleratorUsageJSON{
+						Index: accelerator.GetIndex(), MemoryUsedMiB: accelerator.GetMemoryUsedMib(),
+						Utilization:          accelerator.GetUtilization(),
+						MemoryUsageAvailable: accelerator.GetMemoryUsageAvailable(),
+						UtilizationAvailable: accelerator.GetUtilizationAvailable(),
+					})
+				}
+			}
+		}
+		lastSeen := m.LastSeenAt
+		if online {
+			lastSeen = session.LastHeartbeat()
+		}
 		out = append(out, machineJSON{
 			ID: m.ID, Name: m.Name, Online: online, OS: m.OS, Arch: m.Arch,
 			CPUCores: m.CPUCores, MemoryMiB: m.MemoryMiB, Unified: m.UnifiedMem,
 			Executors:    rawOr(m.Executors),
 			Accelerators: rawOr(m.Accelerators),
-			LastSeen:     m.LastSeenAt.UTC().Format(time.RFC3339),
+			Reserved: reservationJSON{
+				CPUCores:             reserved.CPUs,
+				MemoryMiB:            reserved.MemoryMiB,
+				AcceleratorMemoryMiB: reserved.DeviceMemMiB,
+				ActiveRuns:           reserved.ActiveRuns,
+			},
+			Usage:    usage,
+			LastSeen: lastSeen.UTC().Format(time.RFC3339),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"machines": out})
@@ -693,7 +784,16 @@ func (a *httpAPI) getBlob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *httpAPI) putBlob(w http.ResponseWriter, r *http.Request) {
-	sha, size, err := a.blobs.Write(r.Body, r.PathValue("sha"))
+	expected := r.PathValue("sha")
+	// The SDK already uses HEAD before PUT, but close the race server-side too:
+	// an existing content-addressed blob never needs to be rewritten.
+	if size, err := a.blobs.Size(expected); err == nil {
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"sha256": expected, "size": size,
+		})
+		return
+	}
+	sha, size, err := a.blobs.Write(r.Body, expected)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return

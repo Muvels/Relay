@@ -73,7 +73,10 @@ var migrations = []string{
 }
 
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	// WAL + NORMAL avoids a physical sync for every small state transition.
+	// SQLite still keeps the database consistent across crashes; only the most
+	// recent transactions can roll back after a sudden OS crash or power loss.
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -289,11 +292,10 @@ type RunEvent struct {
 	TsMs  int64  `json:"ts"`
 }
 
-// appendRunEvent records a state transition (append-only; best effort).
-func (s *Store) appendRunEvent(id, state string) {
-	entry := fmt.Sprintf(`{"state":%q,"ts":%d}`+"\n", state, time.Now().UnixMilli())
-	_, _ = s.db.Exec(
-		`UPDATE runs SET events_json = events_json || ? WHERE id = ?`, entry, id)
+// runEvent returns one append-only timeline entry. Callers include it in the
+// same SQL statement as the state change so one transition needs one commit.
+func runEvent(state string) string {
+	return fmt.Sprintf(`{"state":%q,"ts":%d}`+"\n", state, time.Now().UnixMilli())
 }
 
 // ParseRunEvents decodes the newline-delimited event log.
@@ -313,8 +315,9 @@ func ParseRunEvents(eventsJSON string) []RunEvent {
 
 // SetRunEndpoint records where a service is reachable.
 func (s *Store) SetRunEndpoint(id, endpoint string) error {
-	_, err := s.db.Exec(`UPDATE runs SET endpoint=?, updated_at=? WHERE id=?`,
-		endpoint, time.Now().Unix(), id)
+	_, err := s.db.Exec(
+		`UPDATE runs SET endpoint=?, updated_at=? WHERE id=? AND endpoint<>?`,
+		endpoint, time.Now().Unix(), id, endpoint)
 	return err
 }
 
@@ -339,24 +342,23 @@ func (s *Store) ActiveServiceRuns(app, function string) ([]*Run, error) {
 func (s *Store) SetRunAssigned(id, machineID, detail, reservationJSON string) (bool, error) {
 	res, err := s.db.Exec(
 		`UPDATE runs SET state='assigned', detail=?, machine_id=?,
-		        reservation_json=?, updated_at=? WHERE id=? AND state='pending'`,
-		detail, machineID, reservationJSON, time.Now().Unix(), id,
+		        reservation_json=?, events_json=events_json || ?, updated_at=?
+		 WHERE id=? AND state='pending'`,
+		detail, machineID, reservationJSON, runEvent("assigned"), time.Now().Unix(), id,
 	)
 	if err != nil {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	if n > 0 {
-		s.appendRunEvent(id, "assigned")
-	}
 	return n > 0, nil
 }
 
 // SetRunDetail updates only the human-readable detail (queue explanations).
 func (s *Store) SetRunDetail(id, detail string) error {
 	_, err := s.db.Exec(
-		`UPDATE runs SET detail=?, updated_at=? WHERE id=? AND state='pending'`,
-		detail, time.Now().Unix(), id)
+		`UPDATE runs SET detail=?, updated_at=?
+		 WHERE id=? AND state='pending' AND detail<>?`,
+		detail, time.Now().Unix(), id, detail)
 	return err
 }
 
@@ -368,13 +370,11 @@ func (s *Store) CreateRun(app, function, kind, specJSON string) (*Run, error) {
 		State: "pending", SpecJSON: specJSON}
 	now := time.Now().Unix()
 	_, err := s.db.Exec(
-		`INSERT INTO runs(id, app, function, kind, state, spec_json, created_at, updated_at)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		r.ID, app, function, kind, r.State, specJSON, now, now,
+		`INSERT INTO runs(id, app, function, kind, state, spec_json, events_json,
+		                  created_at, updated_at)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		r.ID, app, function, kind, r.State, specJSON, runEvent("pending"), now, now,
 	)
-	if err == nil {
-		s.appendRunEvent(r.ID, "pending")
-	}
 	return r, err
 }
 
@@ -418,7 +418,7 @@ func (s *Store) TransitionRunOwned(id string, from []string, ownerMachineID, sta
 func (s *Store) transitionRun(id string, from []string, ownerMachineID, state, detail, machineID, resultSha string, exitCode int) (bool, error) {
 	var cond string
 	args := []any{state, detail, machineID, machineID, resultSha, resultSha,
-		exitCode, time.Now().Unix(), id}
+		exitCode, runEvent(state), time.Now().Unix(), id}
 	if from == nil {
 		cond = `state NOT IN (` + placeholders(len(terminalStates)) + `)`
 		for _, t := range terminalStates {
@@ -438,7 +438,7 @@ func (s *Store) transitionRun(id string, from []string, ownerMachineID, state, d
 		`UPDATE runs SET state=?, detail=?,
 		        machine_id = CASE WHEN ? != '' THEN ? ELSE machine_id END,
 		        result_sha = CASE WHEN ? != '' THEN ? ELSE result_sha END,
-		        exit_code=?, updated_at=?
+		        exit_code=?, events_json=events_json || ?, updated_at=?
 		 WHERE id=? AND `+cond,
 		args...,
 	)
@@ -446,9 +446,6 @@ func (s *Store) transitionRun(id string, from []string, ownerMachineID, state, d
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	if n > 0 {
-		s.appendRunEvent(id, state)
-	}
 	return n > 0, nil
 }
 
@@ -456,17 +453,15 @@ func (s *Store) transitionRun(id string, from []string, ownerMachineID, state, d
 func (s *Store) RevertRunToPending(id, machineID string) (bool, error) {
 	res, err := s.db.Exec(
 		`UPDATE runs SET state='pending', detail='requeued: machine dropped',
-		        machine_id='', reservation_json='', updated_at=?
+		        machine_id='', reservation_json='',
+		        events_json=events_json || ?, updated_at=?
 		 WHERE id=? AND state='assigned' AND machine_id=?`,
-		time.Now().Unix(), id, machineID,
+		runEvent("pending"), time.Now().Unix(), id, machineID,
 	)
 	if err != nil {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	if n > 0 {
-		s.appendRunEvent(id, "pending")
-	}
 	return n > 0, nil
 }
 
@@ -501,6 +496,140 @@ func (s *Store) ListRuns(limit int, states []string) ([]*Run, error) {
 		}
 		r.CreatedAt, r.UpdatedAt = time.Unix(created, 0), time.Unix(updated, 0)
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ------------------------------------------------------------ retention
+
+// TerminalRunsBefore lists settled runs last touched before cutoff, oldest
+// first, so a sweep makes progress from the far end of history. Live runs
+// are never returned: a run still on a machine outlives any TTL.
+func (s *Store) TerminalRunsBefore(cutoff time.Time, limit int) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT id FROM runs
+		 WHERE state IN (`+placeholders(len(terminalStates))+`) AND updated_at < ?
+		 ORDER BY updated_at LIMIT ?`,
+		append(terminalArgs(), cutoff.Unix(), limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func terminalArgs() []any {
+	args := make([]any, 0, len(terminalStates))
+	for _, t := range terminalStates {
+		args = append(args, t)
+	}
+	return args
+}
+
+// DeleteRuns removes run rows by id. One statement per call keeps the WAL
+// churn of a sweep proportional to sweeps, not to rows.
+func (s *Store) DeleteRuns(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	_, err := s.db.Exec(
+		`DELETE FROM runs WHERE id IN (`+placeholders(len(ids))+`)`, args...)
+	return err
+}
+
+// ReferencedBlobs collects every blob id still reachable from stored state:
+// the code bundle and call payload of each surviving run and schedule, plus
+// each stored result. Anything not in this set is unreachable by any API
+// the SDK can call. Errors are returned rather than swallowed, because a
+// partial answer here would authorize deleting live data.
+func (s *Store) ReferencedBlobs() (map[string]bool, error) {
+	keep := map[string]bool{}
+	// A spec that will not parse is a spec whose blobs cannot be enumerated.
+	// Skipping it would quietly authorize deleting inputs something still
+	// needs, so the whole scan fails instead: destructive GC fails closed.
+	addSpec := func(owner, specJSON string) error {
+		var spec struct {
+			BundleSha string `json:"bundle_sha256"`
+			ArgsSha   string `json:"args_sha256"`
+		}
+		if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+			return fmt.Errorf("unreadable spec on %s: %w", owner, err)
+		}
+		if spec.BundleSha != "" {
+			keep[spec.BundleSha] = true
+		}
+		if spec.ArgsSha != "" {
+			keep[spec.ArgsSha] = true
+		}
+		return nil
+	}
+	runRows, err := s.db.Query(`SELECT id, spec_json, result_sha FROM runs`)
+	if err != nil {
+		return nil, err
+	}
+	defer runRows.Close()
+	for runRows.Next() {
+		var id, specJSON, resultSha string
+		if err := runRows.Scan(&id, &specJSON, &resultSha); err != nil {
+			return nil, err
+		}
+		if err := addSpec("run "+id, specJSON); err != nil {
+			return nil, err
+		}
+		if resultSha != "" {
+			keep[resultSha] = true
+		}
+	}
+	if err := runRows.Err(); err != nil {
+		return nil, err
+	}
+	// Schedules hold a spec that has not run yet; its bundle must survive
+	// however long the cron sits idle between firings.
+	schedRows, err := s.db.Query(`SELECT id, spec_json FROM schedules`)
+	if err != nil {
+		return nil, err
+	}
+	defer schedRows.Close()
+	for schedRows.Next() {
+		var id, specJSON string
+		if err := schedRows.Scan(&id, &specJSON); err != nil {
+			return nil, err
+		}
+		if err := addSpec("schedule "+id, specJSON); err != nil {
+			return nil, err
+		}
+	}
+	return keep, schedRows.Err()
+}
+
+// ExistingRunIDs is the id set of every stored run. Retention uses it to
+// find log files whose run is gone, which is the only way an orphaned log
+// can ever be rediscovered: nothing else records that the file exists.
+func (s *Store) ExistingRunIDs() (map[string]bool, error) {
+	rows, err := s.db.Query(`SELECT id FROM runs`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
 	}
 	return out, rows.Err()
 }

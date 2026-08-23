@@ -289,8 +289,12 @@ func (r *Runs) DispatchPending() {
 		run := pending[i]
 		var spec RunSpecJSON
 		if err := json.Unmarshal([]byte(run.SpecJSON), &spec); err != nil {
-			_, _ = r.store.TransitionRun(run.ID, nil, "error",
-				"corrupt spec: "+err.Error(), "", "", 0)
+			// Settling a run without closing its log stream would strand any
+			// follower on it forever; every other terminal path closes too.
+			if changed, _ := r.store.TransitionRun(run.ID, nil, "error",
+				"corrupt spec: "+err.Error(), "", "", 0); changed {
+				r.logs.Close(run.ID)
+			}
 			continue
 		}
 		decision, rejections := scheduler.Place(toSchedRequest(&spec), machines)
@@ -367,6 +371,15 @@ func (r *Runs) HandleStatus(machineID string, upd *relayv1.RunStatusUpdate) {
 	if err != nil || run.MachineID != machineID {
 		return // Ignore stale updates for unknown runs or runs owned by another machine.
 	}
+	// A Send can succeed just before its stream reports an error, causing the
+	// agent to retry the same status on reconnect. Do not turn that harmless
+	// retry into another WAL write and duplicate timeline event.
+	if run.State == state && run.Detail == upd.GetDetail() &&
+		(upd.GetResultSha256() == "" || run.ResultSha == upd.GetResultSha256()) &&
+		run.ExitCode == int(upd.GetExitCode()) &&
+		(upd.GetEndpoint() == "" || run.Endpoint == upd.GetEndpoint()) {
+		return
+	}
 	// Conditional write: terminal states settle exactly once, and ownership
 	// is rechecked in the WHERE clause. A machine that lost the run
 	// between our read and this write cannot land a stale update.
@@ -401,18 +414,16 @@ func (r *Runs) Reconcile(machineID string, activeRunIDs []string) {
 	for _, id := range activeRunIDs {
 		active[id] = true
 	}
-	for _, state := range []string{"assigned", "building", "running"} {
-		runs, err := r.store.ListRuns(liveRunsCap, []string{state})
-		if err != nil {
-			continue
-		}
-		for _, run := range runs {
-			if run.MachineID == machineID && !active[run.ID] {
-				if changed, _ := r.store.TransitionRun(run.ID, []string{state},
-					"lost", "agent restarted while the run was live",
-					"", "", 0); changed {
-					r.logs.Close(run.ID)
-				}
+	runs, err := r.store.ListRuns(liveRunsCap, []string{"assigned", "building", "running"})
+	if err != nil {
+		return
+	}
+	for _, run := range runs {
+		if run.MachineID == machineID && !active[run.ID] {
+			if changed, _ := r.store.TransitionRun(run.ID, []string{run.State},
+				"lost", "agent restarted while the run was live",
+				"", "", 0); changed {
+				r.logs.Close(run.ID)
 			}
 		}
 	}
@@ -498,27 +509,25 @@ func (r *Runs) Janitor(offlineAfter time.Duration) {
 		r.DispatchPending()
 		return
 	}
-	for _, state := range []string{"assigned", "building", "running"} {
-		runs, err := r.store.ListRuns(liveRunsCap, []string{state})
-		if err != nil {
+	runs, err := r.store.ListRuns(liveRunsCap, []string{"assigned", "building", "running"})
+	if err != nil {
+		return
+	}
+	for _, run := range runs {
+		s, connected := r.fleet.Get(run.MachineID)
+		if connected && time.Since(s.LastHeartbeat()) < offlineAfter {
 			continue
 		}
-		for _, run := range runs {
-			s, connected := r.fleet.Get(run.MachineID)
-			if connected && time.Since(s.LastHeartbeat()) < offlineAfter {
-				continue
+		if !connected {
+			m, err := r.store.MachineByID(run.MachineID)
+			if err == nil && time.Since(m.LastSeenAt) < offlineAfter {
+				continue // recently seen; give it time to reconnect
 			}
-			if !connected {
-				m, err := r.store.MachineByID(run.MachineID)
-				if err == nil && time.Since(m.LastSeenAt) < offlineAfter {
-					continue // recently seen; give it time to reconnect
-				}
-			}
-			if changed, _ := r.store.TransitionRun(run.ID, []string{state},
-				"lost", "machine went offline during the run", "", "", 0); changed {
-				r.logs.Close(run.ID)
-				slog.Warn("run lost", "run", run.ID, "machine", run.MachineID)
-			}
+		}
+		if changed, _ := r.store.TransitionRun(run.ID, []string{run.State},
+			"lost", "machine went offline during the run", "", "", 0); changed {
+			r.logs.Close(run.ID)
+			slog.Warn("run lost", "run", run.ID, "machine", run.MachineID)
 		}
 	}
 	r.DispatchPending()
