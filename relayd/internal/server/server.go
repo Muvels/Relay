@@ -18,9 +18,10 @@ import (
 )
 
 type Config struct {
-	DataDir  string
-	GRPCAddr string // agents dial this
-	HTTPAddr string // SDK/CLI dial this
+	DataDir   string
+	GRPCAddr  string // agents dial this
+	HTTPAddr  string // SDK/CLI dial this
+	Retention RetentionConfig
 }
 
 type Server struct {
@@ -96,6 +97,7 @@ func Start(cfg Config) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	StartJanitor(ctx, runs)
 	StartCron(ctx, store, runs)
+	StartRetention(ctx, store, logs, blobs, cfg.Retention)
 
 	cert, fingerprint, err := EnsureCert(cfg.DataDir)
 	if err != nil {
@@ -134,7 +136,8 @@ func Start(cfg Config) (*Server, error) {
 	}()
 
 	slog.Info("relayd server up",
-		"http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr, "data", cfg.DataDir)
+		"http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr, "data", cfg.DataDir,
+		"retention", cfg.Retention.describe())
 	return &Server{
 		cfg: cfg, store: store, grpcSrv: grpcSrv, httpSrv: httpSrv,
 		APIToken: apiToken, Fingerprint: fingerprint, cancel: cancel,

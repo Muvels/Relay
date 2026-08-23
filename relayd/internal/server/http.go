@@ -261,17 +261,32 @@ func (a *httpAPI) cancelRun(w http.ResponseWriter, r *http.Request) {
 // lines until the run finishes (or immediately when follow=0).
 func (a *httpAPI) runLogs(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
-	if _, err := a.store.GetRun(runID); errors.Is(err, ErrNotFound) {
+	run, err := a.store.GetRun(runID)
+	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "no run %s", runID)
 		return
 	}
+	// A settled run gets its backlog and nothing else, even under --follow.
+	// The run row is the only durable record of that, so a server restart
+	// must not turn `relay logs <old-run>` into a hang.
+	finished := err == nil && IsTerminal(run.State)
 	follow := r.URL.Query().Get("follow") != "0"
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 
-	backlog, live, cancel := a.logs.Subscribe(runID)
+	backlog, live, cancel := a.logs.Subscribe(runID, finished)
+	if live != nil {
+		// Re-read after subscribing. If the run settled in between, its
+		// Close already ran and will never close the channel we just took,
+		// so this follower would wait forever. Re-subscribing as finished
+		// also re-reads the backlog, which now holds the final lines.
+		if settled, gerr := a.store.GetRun(runID); gerr == nil && IsTerminal(settled.State) {
+			cancel()
+			backlog, live, cancel = a.logs.Subscribe(runID, true)
+		}
+	}
 	defer cancel()
 	for _, line := range backlog {
 		fmt.Fprintln(w, line)

@@ -263,8 +263,12 @@ func (r *Runs) DispatchPending() {
 		run := pending[i]
 		var spec RunSpecJSON
 		if err := json.Unmarshal([]byte(run.SpecJSON), &spec); err != nil {
-			_, _ = r.store.TransitionRun(run.ID, nil, "error",
-				"corrupt spec: "+err.Error(), "", "", 0)
+			// Settling a run without closing its log stream would strand any
+			// follower on it forever; every other terminal path closes too.
+			if changed, _ := r.store.TransitionRun(run.ID, nil, "error",
+				"corrupt spec: "+err.Error(), "", "", 0); changed {
+				r.logs.Close(run.ID)
+			}
 			continue
 		}
 		decision, rejections := scheduler.Place(toSchedRequest(&spec), machines)

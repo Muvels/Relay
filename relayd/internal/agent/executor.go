@@ -185,6 +185,7 @@ func (e *DockerExecutor) baseConfig(ctx context.Context, spec *relayv1.RunSpec, 
 		Env:        env,
 		Labels:     map[string]string{"dev.relay.run": runID},
 	}
+	cfg.HostConfig.LogConfig = cappedLogging()
 	// The workspace is a per-run scratch copy, so it mounts read-write.
 	// unlike M0 local mode, which mounts the user's real project read-only.
 	cfg.HostConfig.Binds = []string{

@@ -500,6 +500,140 @@ func (s *Store) ListRuns(limit int, states []string) ([]*Run, error) {
 	return out, rows.Err()
 }
 
+// ------------------------------------------------------------ retention
+
+// TerminalRunsBefore lists settled runs last touched before cutoff, oldest
+// first, so a sweep makes progress from the far end of history. Live runs
+// are never returned: a run still on a machine outlives any TTL.
+func (s *Store) TerminalRunsBefore(cutoff time.Time, limit int) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT id FROM runs
+		 WHERE state IN (`+placeholders(len(terminalStates))+`) AND updated_at < ?
+		 ORDER BY updated_at LIMIT ?`,
+		append(terminalArgs(), cutoff.Unix(), limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func terminalArgs() []any {
+	args := make([]any, 0, len(terminalStates))
+	for _, t := range terminalStates {
+		args = append(args, t)
+	}
+	return args
+}
+
+// DeleteRuns removes run rows by id. One statement per call keeps the WAL
+// churn of a sweep proportional to sweeps, not to rows.
+func (s *Store) DeleteRuns(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	_, err := s.db.Exec(
+		`DELETE FROM runs WHERE id IN (`+placeholders(len(ids))+`)`, args...)
+	return err
+}
+
+// ReferencedBlobs collects every blob id still reachable from stored state:
+// the code bundle and call payload of each surviving run and schedule, plus
+// each stored result. Anything not in this set is unreachable by any API
+// the SDK can call. Errors are returned rather than swallowed, because a
+// partial answer here would authorize deleting live data.
+func (s *Store) ReferencedBlobs() (map[string]bool, error) {
+	keep := map[string]bool{}
+	// A spec that will not parse is a spec whose blobs cannot be enumerated.
+	// Skipping it would quietly authorize deleting inputs something still
+	// needs, so the whole scan fails instead: destructive GC fails closed.
+	addSpec := func(owner, specJSON string) error {
+		var spec struct {
+			BundleSha string `json:"bundle_sha256"`
+			ArgsSha   string `json:"args_sha256"`
+		}
+		if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+			return fmt.Errorf("unreadable spec on %s: %w", owner, err)
+		}
+		if spec.BundleSha != "" {
+			keep[spec.BundleSha] = true
+		}
+		if spec.ArgsSha != "" {
+			keep[spec.ArgsSha] = true
+		}
+		return nil
+	}
+	runRows, err := s.db.Query(`SELECT id, spec_json, result_sha FROM runs`)
+	if err != nil {
+		return nil, err
+	}
+	defer runRows.Close()
+	for runRows.Next() {
+		var id, specJSON, resultSha string
+		if err := runRows.Scan(&id, &specJSON, &resultSha); err != nil {
+			return nil, err
+		}
+		if err := addSpec("run "+id, specJSON); err != nil {
+			return nil, err
+		}
+		if resultSha != "" {
+			keep[resultSha] = true
+		}
+	}
+	if err := runRows.Err(); err != nil {
+		return nil, err
+	}
+	// Schedules hold a spec that has not run yet; its bundle must survive
+	// however long the cron sits idle between firings.
+	schedRows, err := s.db.Query(`SELECT id, spec_json FROM schedules`)
+	if err != nil {
+		return nil, err
+	}
+	defer schedRows.Close()
+	for schedRows.Next() {
+		var id, specJSON string
+		if err := schedRows.Scan(&id, &specJSON); err != nil {
+			return nil, err
+		}
+		if err := addSpec("schedule "+id, specJSON); err != nil {
+			return nil, err
+		}
+	}
+	return keep, schedRows.Err()
+}
+
+// ExistingRunIDs is the id set of every stored run. Retention uses it to
+// find log files whose run is gone, which is the only way an orphaned log
+// can ever be rediscovered: nothing else records that the file exists.
+func (s *Store) ExistingRunIDs() (map[string]bool, error) {
+	rows, err := s.db.Query(`SELECT id FROM runs`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 func placeholders(n int) string {
 	s := ""
 	for i := 0; i < n; i++ {

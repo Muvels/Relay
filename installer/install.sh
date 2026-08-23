@@ -46,7 +46,13 @@ BIN_DIR="/usr/local/bin"
 mkdir -p "$BIN_DIR"
 
 echo "→ fetching $ASSET from $SERVER_URL"
-curl -fsSL "$SERVER_URL/v1/install/$ASSET" -o "$BIN_DIR/relayd"
+if ! curl -fsSL "$SERVER_URL/v1/install/$ASSET" -o "$BIN_DIR/relayd"; then
+  echo "✗ $SERVER_URL/v1/install/$ASSET is not being served." >&2
+  echo "  The server only hands out binaries it has been given. On the" >&2
+  echo "  machine running relayd, build and stage them once:" >&2
+  echo "      make stage      # cross-compiles and copies into ~/.relay/server/binaries/" >&2
+  exit 1
+fi
 chmod +x "$BIN_DIR/relayd"
 echo "✓ installed $BIN_DIR/relayd ($("$BIN_DIR/relayd" version))"
 
@@ -64,13 +70,74 @@ if ! "$BIN_DIR/relayd" agent --join "$JOIN" $NAME_FLAG \
 fi
 echo "✓ joined; installing service"
 
+# Root, or sudo that needs no password, lets us install a SYSTEM unit. That
+# is the right shape for an always-on machine: it starts at boot with no
+# login, and it can genuinely order itself after docker.service.
+can_sudo() {
+  [ "$(id -u)" = "0" ] && return 0
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null
+}
+
+# -n throughout: this script is normally the tail of a `curl | sh` pipeline,
+# where a sudo password prompt has no sane place to happen.
+as_root() {
+  if [ "$(id -u)" = "0" ]; then "$@"; else sudo -n "$@"; fi
+}
+
 if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
-  SERVICE_DIR="$HOME/.config/systemd/user"
-  mkdir -p "$SERVICE_DIR"
-  cat > "$SERVICE_DIR/relay-agent.service" <<EOF
+  if can_sudo; then
+    # An earlier install of this script registered a USER unit. Leaving it
+    # enabled would run two agents on one set of credentials: they would take
+    # turns superseding each other's fleet session, and whichever one holds
+    # no runs would reconcile the other's runs as lost.
+    if systemctl --user is-enabled relay-agent.service >/dev/null 2>&1 ||
+       systemctl --user is-active relay-agent.service >/dev/null 2>&1; then
+      echo "→ removing the previous user-level relay-agent service"
+      systemctl --user disable --now relay-agent.service >/dev/null 2>&1 || true
+      rm -f "$HOME/.config/systemd/user/relay-agent.service"
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
+    UNIT=/etc/systemd/system/relay-agent.service
+    as_root sh -c "cat > $UNIT" <<EOF
 [Unit]
 Description=Relay machine agent
+Wants=network-online.target
 After=network-online.target docker.service
+
+[Service]
+User=$(id -un)
+ExecStart=$BIN_DIR/relayd agent --server $SERVER_ADDR --state-dir $STATE_DIR
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    as_root systemctl daemon-reload
+    as_root systemctl enable --now relay-agent.service
+    echo "✓ systemd system service relay-agent running (starts at boot)"
+    echo "  logs: journalctl -u relay-agent -f"
+  else
+    # The mirror image: a system unit from a previous install would keep
+    # running alongside the user unit we are about to enable, and removing it
+    # needs the sudo we just established we do not have.
+    if systemctl is-enabled relay-agent.service >/dev/null 2>&1 ||
+       systemctl is-active relay-agent.service >/dev/null 2>&1; then
+      echo "✗ a system-wide relay-agent service is already installed, and" >&2
+      echo "  this run has no passwordless sudo to replace it. Running both" >&2
+      echo "  would put two agents on one machine identity. Either:" >&2
+      echo "      sudo systemctl disable --now relay-agent   # then re-run" >&2
+      echo "  or re-run this installer with sudo available." >&2
+      exit 1
+    fi
+    SERVICE_DIR="$HOME/.config/systemd/user"
+    mkdir -p "$SERVICE_DIR"
+    # No After=docker.service here: a user unit cannot order against a system
+    # one. The agent watches for Docker appearing and refreshes its inventory
+    # itself, so a late daemon is recovered rather than baked in.
+    cat > "$SERVICE_DIR/relay-agent.service" <<EOF
+[Unit]
+Description=Relay machine agent
 
 [Service]
 ExecStart=$BIN_DIR/relayd agent --server $SERVER_ADDR --state-dir $STATE_DIR
@@ -80,10 +147,20 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now relay-agent.service
-  echo "✓ systemd user service relay-agent running"
-  echo "  (for headless machines: sudo loginctl enable-linger $USER)"
+    systemctl --user daemon-reload
+    systemctl --user enable --now relay-agent.service
+    echo "✓ systemd user service relay-agent running"
+    # A user service without lingering dies with the last session, which on a
+    # headless box means "when you close the SSH window".
+    if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+      echo "✓ lingering enabled: the agent survives logout and starts at boot"
+    else
+      echo "! IMPORTANT: this is a user service, so it stops when your last" >&2
+      echo "  session ends and does NOT start at boot. Enable lingering:" >&2
+      echo "      sudo loginctl enable-linger $(id -un)" >&2
+      echo "  Or re-run this installer with passwordless sudo for a system unit." >&2
+    fi
+  fi
 elif [ "$OS" = "darwin" ]; then
   PLIST="$HOME/Library/LaunchAgents/dev.relay.agent.plist"
   mkdir -p "$HOME/Library/LaunchAgents"

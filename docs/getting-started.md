@@ -77,6 +77,12 @@ cloudpickle); subsequent runs reuse it and start in well under a second.
    installs relayd, joins verifiably, and registers a systemd/launchd
    service.
 
+   On Linux the installer registers a **system** unit (starts at boot, ordered
+   after `docker.service`) when it can use sudo without a password. Otherwise
+   it falls back to a user unit and enables lingering, because a user service
+   without it stops when your last SSH session closes. Watch that line of
+   output on a headless box.
+
 4. **Run things**. The same code works unchanged. With a server configured,
    `.remote()`/`.spawn()` submit to the fleet:
 

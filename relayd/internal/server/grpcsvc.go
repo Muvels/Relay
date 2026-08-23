@@ -193,11 +193,27 @@ func (s *AgentSvc) Session(stream grpc.BidiStreamingServer[relayv1.AgentMessage,
 					s.runs.DispatchPending() // capacity freed
 				}
 			case *relayv1.AgentMessage_Logs:
+				runID := payload.Logs.GetRunId()
+				// Only checked when this process is not already streaming the
+				// run, so the cost is one lookup per run per session rather
+				// than one per batch. A run whose row is gone would otherwise
+				// keep recreating its log file after retention deleted it,
+				// forever, so the agent is told to stop it at the source.
+				if !s.logs.IsOpen(runID) {
+					if _, err := s.store.GetRun(runID); errors.Is(err, ErrNotFound) {
+						slog.Warn("logs for a run this server no longer has; "+
+							"canceling it", "run", runID, "machine", m.Name)
+						session.TrySend(&relayv1.ServerMessage{
+							Msg: &relayv1.ServerMessage_Cancel{
+								Cancel: &relayv1.CancelRun{RunId: runID}}})
+						continue
+					}
+				}
 				lines := make([]string, 0, len(payload.Logs.GetLines()))
 				for _, l := range payload.Logs.GetLines() {
 					lines = append(lines, l.GetLine())
 				}
-				s.logs.Append(payload.Logs.GetRunId(), lines)
+				s.logs.Append(runID, lines)
 			case *relayv1.AgentMessage_ExecOutput:
 				s.execHub.Deliver(payload.ExecOutput)
 			}
