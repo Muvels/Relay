@@ -102,8 +102,13 @@ func (b *BlobStore) Write(r io.Reader, expected string) (string, int64, error) {
 	if err := tmp.Close(); err != nil {
 		return "", 0, err
 	}
-	if err := os.Rename(tmp.Name(), p); err != nil && !errors.Is(err, os.ErrExist) {
-		return "", 0, err
+	// Link is an atomic create-if-absent on the same filesystem. Unlike Rename
+	// on Unix it never replaces an identical blob another upload already put
+	// in place, avoiding needless data and metadata writes during races.
+	if err := os.Link(tmp.Name(), p); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return "", 0, err
+		}
 	}
 	return sha, n, nil
 }

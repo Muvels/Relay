@@ -56,6 +56,7 @@ type Agent struct {
 	docker *dockerClient
 	exec   *DockerExecutor
 	native *NativeExecutor
+	usage  *usageCollector
 
 	mu     sync.Mutex
 	active map[string]context.CancelFunc
@@ -84,6 +85,7 @@ func Run(ctx context.Context, cfg Config) error {
 	a := &Agent{
 		cfg:        cfg,
 		docker:     newDockerClient(cfg.DockerSock),
+		usage:      newUsageCollector(),
 		active:     map[string]context.CancelFunc{},
 		statusCh:   make(chan *relayv1.AgentMessage, 1024),
 		logCh:      make(chan *relayv1.AgentMessage, 1024),
@@ -113,6 +115,9 @@ func Run(ctx context.Context, cfg Config) error {
 		_, active := a.active[runID]
 		return active
 	})
+	if err := cleanupStaleRunDirs(cfg.StateDir); err != nil {
+		slog.Warn("could not clean stale run scratch", "err", err)
+	}
 
 	if err := a.join(ctx); err != nil {
 		return err
@@ -306,13 +311,80 @@ func (a *Agent) session(ctx context.Context) error {
 	a.persistSeenCert()
 	slog.Info("connected", "server_version", hello.GetServerVersion())
 
+	type telemetryLease struct {
+		duration time.Duration
+		interval time.Duration
+	}
+	telemetryConfig := make(chan telemetryLease, 1)
+	telemetryRequests := make(chan struct{}, 1)
+	telemetrySamples := make(chan *relayv1.Heartbeat, 1)
+	go func() {
+		for {
+			select {
+			case <-sctx.Done():
+				return
+			case <-telemetryRequests:
+				sample := a.usage.Sample(sctx)
+				select {
+				case telemetrySamples <- sample:
+				default: // keep at most one fresh sample queued for the writer
+				}
+			}
+		}
+	}()
+
 	// Writer: heartbeats + executor events. Status messages take priority
 	// over logs; a failed status Send is requeued, never lost.
 	writerDone := make(chan error, 1)
 	go func() {
 		ticker := time.NewTicker(heartbeatEvery)
 		defer ticker.Stop()
+		telemetryTimer := time.NewTimer(time.Hour)
+		if !telemetryTimer.Stop() {
+			<-telemetryTimer.C
+		}
+		defer telemetryTimer.Stop()
+		var telemetryTimerC <-chan time.Time
+		var telemetryUntil time.Time
+		telemetryEvery := 3 * time.Second
+		resetTelemetryTimer := func(after time.Duration) {
+			if !telemetryTimer.Stop() {
+				select {
+				case <-telemetryTimer.C:
+				default:
+				}
+			}
+			telemetryTimer.Reset(after)
+			telemetryTimerC = telemetryTimer.C
+		}
+		requestTelemetrySample := func() {
+			select {
+			case telemetryRequests <- struct{}{}:
+			default:
+			}
+		}
+		var sendLogs func(*relayv1.AgentMessage) error
 		sendStatus := func(msg *relayv1.AgentMessage) error {
+			// Executors join their log follower before reporting a terminal state.
+			// Flush those already-queued lines first so clients never observe a
+			// finished run whose final log batch is still behind the status.
+			if st := msg.GetRunStatus(); st != nil {
+				switch st.GetState() {
+				case relayv1.RunState_RUN_SUCCEEDED, relayv1.RunState_RUN_FAILED,
+					relayv1.RunState_RUN_ERROR, relayv1.RunState_RUN_CANCELED,
+					relayv1.RunState_RUN_LOST:
+					select {
+					case pendingLogs := <-a.logCh:
+						if err := sendLogs(pendingLogs); err != nil {
+							a.mu.Lock()
+							a.pendingStatus = append(a.pendingStatus, msg)
+							a.mu.Unlock()
+							return err
+						}
+					default:
+					}
+				}
+			}
 			if err := stream.Send(msg); err != nil {
 				a.mu.Lock()
 				a.pendingStatus = append(a.pendingStatus, msg)
@@ -327,6 +399,48 @@ func (a *Agent) session(ctx context.Context) error {
 					a.unreported[st.GetRunId()]--
 				}
 				a.mu.Unlock()
+			}
+			return nil
+		}
+		// Coalesce log lines that are already queued into one message per run.
+		// This adds no timer or steady-state work, while turning output bursts
+		// into far fewer network and filesystem writes on the server.
+		sendLogs = func(first *relayv1.AgentMessage) error {
+			const maxLines = 128
+			batches := map[string][]*relayv1.LogLine{}
+			var runIDs []string
+			add := func(msg *relayv1.AgentMessage) {
+				logs := msg.GetLogs()
+				if logs == nil || len(logs.GetLines()) == 0 {
+					return
+				}
+				runID := logs.GetRunId()
+				if _, exists := batches[runID]; !exists {
+					runIDs = append(runIDs, runID)
+				}
+				batches[runID] = append(batches[runID], logs.GetLines()...)
+			}
+			add(first)
+			count := len(first.GetLogs().GetLines())
+			for count < maxLines {
+				select {
+				case msg := <-a.logCh:
+					if logs := msg.GetLogs(); logs != nil {
+						count += len(logs.GetLines())
+					}
+					add(msg)
+				default:
+					count = maxLines
+				}
+			}
+			for _, runID := range runIDs {
+				if err := stream.Send(&relayv1.AgentMessage{
+					Msg: &relayv1.AgentMessage_Logs{Logs: &relayv1.LogBatch{
+						RunId: runID, Lines: batches[runID],
+					}},
+				}); err != nil {
+					return err
+				}
 			}
 			return nil
 		}
@@ -358,7 +472,30 @@ func (a *Agent) session(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				if err := stream.Send(&relayv1.AgentMessage{
-					Msg: &relayv1.AgentMessage_Heartbeat{Heartbeat: a.usage()},
+					Msg: &relayv1.AgentMessage_Heartbeat{Heartbeat: &relayv1.Heartbeat{}},
+				}); err != nil {
+					writerDone <- err
+					return
+				}
+			case lease := <-telemetryConfig:
+				wasActive := telemetryTimerC != nil && time.Now().Before(telemetryUntil)
+				telemetryUntil = time.Now().Add(lease.duration)
+				telemetryEvery = lease.interval
+				if !wasActive {
+					a.usage.ResetCPU()
+					requestTelemetrySample()
+					resetTelemetryTimer(telemetryEvery)
+				}
+			case <-telemetryTimerC:
+				if !time.Now().Before(telemetryUntil) {
+					telemetryTimerC = nil
+					continue
+				}
+				requestTelemetrySample()
+				resetTelemetryTimer(telemetryEvery)
+			case sample := <-telemetrySamples:
+				if err := stream.Send(&relayv1.AgentMessage{
+					Msg: &relayv1.AgentMessage_Heartbeat{Heartbeat: sample},
 				}); err != nil {
 					writerDone <- err
 					return
@@ -369,7 +506,7 @@ func (a *Agent) session(ctx context.Context) error {
 					return
 				}
 			case msg := <-a.logCh:
-				if err := stream.Send(msg); err != nil {
+				if err := sendLogs(msg); err != nil {
 					writerDone <- err
 					return
 				}
@@ -408,6 +545,29 @@ func (a *Agent) session(ctx context.Context) error {
 			a.cancelRun(payload.Cancel.GetRunId())
 		case *relayv1.ServerMessage_Exec:
 			go a.runExec(ctx, payload.Exec)
+		case *relayv1.ServerMessage_Telemetry:
+			duration := time.Duration(payload.Telemetry.GetDurationS()) * time.Second
+			interval := time.Duration(payload.Telemetry.GetIntervalS()) * time.Second
+			if duration < 3*time.Second || duration > 30*time.Second {
+				duration = 8 * time.Second
+			}
+			if interval < 2*time.Second || interval > 10*time.Second {
+				interval = 3 * time.Second
+			}
+			lease := telemetryLease{duration: duration, interval: interval}
+			select {
+			case telemetryConfig <- lease:
+			default:
+				// Coalesce repeated dashboard renewals without blocking assignments.
+				select {
+				case <-telemetryConfig:
+				default:
+				}
+				select {
+				case telemetryConfig <- lease:
+				default:
+				}
+			}
 		}
 	}
 }
@@ -536,12 +696,6 @@ func (a *Agent) cancelRun(runID string) {
 		slog.Info("run canceled by server", "run", runID)
 		cancel()
 	}
-}
-
-func (a *Agent) usage() *relayv1.Heartbeat {
-	// M1 heartbeat is liveness only; M2 fills in real utilization for the
-	// scheduler's tiebreaks (reservations, not usage, drive admission).
-	return &relayv1.Heartbeat{}
 }
 
 // ------------------------------------------------------------ Events

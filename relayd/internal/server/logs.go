@@ -2,9 +2,9 @@ package server
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -48,8 +48,19 @@ func (h *LogHub) Append(runID string, lines []string) {
 		}
 		h.files[runID] = f
 	}
+	// One write per incoming batch instead of one write per line. The agent
+	// also coalesces bursty output, keeping log-heavy runs from generating a
+	// stream of tiny filesystem writes without delaying live subscribers.
+	var batch strings.Builder
 	for _, line := range lines {
-		fmt.Fprintln(f, line)
+		batch.Grow(len(line) + 1)
+		batch.WriteString(line)
+		batch.WriteByte('\n')
+	}
+	if batch.Len() > 0 {
+		_, _ = f.WriteString(batch.String())
+	}
+	for _, line := range lines {
 		for ch := range h.subs[runID] {
 			select {
 			case ch <- line:

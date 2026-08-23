@@ -140,6 +140,9 @@ func (s *AgentSvc) Session(stream grpc.BidiStreamingServer[relayv1.AgentMessage,
 	session := s.fleet.Attach(m, hello.GetInventory(), hello.GetCachedImageTags())
 	defer func() {
 		if s.fleet.Detach(m.ID, session) {
+			// Persist once at disconnect. While connected, last-seen liveness is
+			// held in Session memory so idle agents do not churn SQLite's WAL.
+			_ = s.store.TouchMachine(m.ID)
 			// Only the current session requeues on exit. A superseded one
 			// must not undo assignments sent through its replacement.
 			s.runs.OnAgentDetach(m.ID)
@@ -184,7 +187,6 @@ func (s *AgentSvc) Session(stream grpc.BidiStreamingServer[relayv1.AgentMessage,
 			switch payload := msg.Msg.(type) {
 			case *relayv1.AgentMessage_Heartbeat:
 				session.Beat(payload.Heartbeat)
-				_ = s.store.TouchMachine(m.ID)
 			case *relayv1.AgentMessage_RunStatus:
 				s.runs.HandleStatus(m.ID, payload.RunStatus)
 				if IsTerminal(protoStateNames[payload.RunStatus.GetState()]) {

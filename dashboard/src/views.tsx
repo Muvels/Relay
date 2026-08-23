@@ -402,10 +402,43 @@ export function MachinesView({
   snapshot: Snapshot;
   openRun: (target: DrawerTarget) => void;
 }) {
-  const all = [...snapshot.services, ...snapshot.runs];
+  const all = [
+    ...new Map(
+      [...snapshot.services, ...snapshot.runs].map((run) => [run.id, run]),
+    ).values(),
+  ];
+  const online = snapshot.machines.filter((machine) => machine.online);
+  const totalCPUs = online.reduce((sum, machine) => sum + machine.cpu_cores, 0);
+  const reservedCPUs = online.reduce(
+    (sum, machine) => sum + machine.reserved.cpu_cores,
+    0,
+  );
+  const totalMemory = online.reduce((sum, machine) => sum + machine.memory_mib, 0);
+  const reservedMemory = online.reduce(
+    (sum, machine) => sum + reservedMemoryMiB(machine),
+    0,
+  );
+  const activeRuns = online.reduce(
+    (sum, machine) => sum + machine.reserved.active_runs,
+    0,
+  );
+
   return (
     <div>
-      <h1 className="mb-5 text-[26px] font-semibold tracking-tight text-ink">Machines</h1>
+      <div className="mb-5 flex items-end justify-between gap-4">
+        <div>
+          <h1 className="text-[26px] font-semibold tracking-tight text-ink">
+            Machines
+          </h1>
+          <p className="mt-1 text-sm text-ink-faint">
+            Live OS telemetry and Relay capacity. Sampling runs only while this
+            page is open.
+          </p>
+        </div>
+        <span className="hidden text-xs text-ink-faint md:inline">
+          refreshes every 3 seconds
+        </span>
+      </div>
       {snapshot.machines.length === 0 ? (
         <Empty>
           No machines joined.{" "}
@@ -413,26 +446,191 @@ export function MachinesView({
           line.
         </Empty>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          {snapshot.machines.map((m) => (
-            <MachineCard
-              key={m.id}
-              machine={m}
-              runs={all.filter((r) => r.machine === m.name)}
-              openRun={openRun}
+        <>
+          <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+            <FleetStat
+              label="Machines online"
+              value={`${online.length} / ${snapshot.machines.length}`}
+              detail={online.length === snapshot.machines.length ? "fleet ready" : "some unavailable"}
             />
-          ))}
-        </div>
+            <FleetStat
+              label="CPU schedulable"
+              value={`${formatCores(Math.max(totalCPUs - reservedCPUs, 0))}`}
+              detail={`${formatCores(totalCPUs)} total`}
+            />
+            <FleetStat
+              label="Memory schedulable"
+              value={formatMiB(Math.max(totalMemory - reservedMemory, 0))}
+              detail={`${formatMiB(totalMemory)} total`}
+            />
+            <FleetStat
+              label="Active allocations"
+              value={`${activeRuns}`}
+              detail={activeRuns === 1 ? "run or service" : "runs and services"}
+            />
+          </div>
+
+          <div className="space-y-4">
+            {snapshot.machines.map((m) => (
+              <MachineCard
+                key={m.id}
+                machine={m}
+                runs={all.filter((r) => r.machine === m.name)}
+                openRun={openRun}
+              />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-function acceleratorLabel(a: Machine["accelerators"][number], unified: boolean) {
-  const kind = (a.kind ?? "?").toUpperCase();
-  const vram =
-    !unified && a.memory_mib ? ` · ${Math.round(a.memory_mib / 1024)}GB` : "";
-  return `${kind}${a.name ? ` · ${a.name}` : ""}${vram}`;
+function FleetStat({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <Card className="px-4 py-3">
+      <div className="text-xs text-ink-faint">{label}</div>
+      <div className="mt-1 text-xl font-semibold tracking-tight text-ink">{value}</div>
+      <div className="mt-1 text-xs text-ink-faint">{detail}</div>
+    </Card>
+  );
+}
+
+function formatMiB(mib: number): string {
+  if (!Number.isFinite(mib) || mib <= 0) return "0 GB";
+  const gib = mib / 1024;
+  return `${gib >= 10 ? Math.round(gib) : Math.round(gib * 10) / 10} GB`;
+}
+
+function formatCores(cores: number): string {
+  const rounded = Math.round(cores * 10) / 10;
+  return `${rounded} ${rounded === 1 ? "core" : "cores"}`;
+}
+
+function reservedAcceleratorMiB(machine: Machine): number {
+  return Object.values(machine.reserved.accelerator_memory_mib ?? {}).reduce(
+    (sum, value) => sum + value,
+    0,
+  );
+}
+
+function reservedMemoryMiB(machine: Machine): number {
+  return (
+    machine.reserved.memory_mib +
+    (machine.unified_memory ? reservedAcceleratorMiB(machine) : 0)
+  );
+}
+
+function percentage(used: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.min(100, Math.max(0, (used / total) * 100));
+}
+
+function ResourceMeter({
+  label,
+  reserved,
+  liveUsed = 0,
+  liveAvailable = false,
+  liveDetail,
+  total,
+  unit,
+  unavailable = false,
+}: {
+  label: string;
+  reserved: number;
+  liveUsed?: number;
+  liveAvailable?: boolean;
+  liveDetail?: string;
+  total: number;
+  unit: "cores" | "memory";
+  unavailable?: boolean;
+}) {
+  const free = Math.max(total - reserved, 0);
+  const osFree = Math.max(total - liveUsed, 0);
+  const reservedPercent = percentage(reserved, total);
+  // Live OS use includes Relay processes. Render Relay's reservation first,
+  // then only OS use beyond it, avoiding a visually double-counted bar.
+  const additionalOSUsed = Math.max(liveUsed - reserved, 0);
+  const additionalOSPercent = Math.min(
+    100 - reservedPercent,
+    percentage(additionalOSUsed, total),
+  );
+  const format = unit === "cores" ? formatCores : formatMiB;
+
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between gap-4 text-sm">
+        <span className="text-ink-dim">
+          {label}
+          {liveDetail ? (
+            <span className="ml-2 text-xs text-ink-faint">{liveDetail}</span>
+          ) : null}
+        </span>
+        <span className="text-right font-mono text-xs text-ink">
+          {unavailable
+            ? "unavailable"
+            : liveAvailable
+              ? `${format(osFree)} OS free`
+              : "collecting live sample…"}
+        </span>
+      </div>
+      <div className="flex h-2 overflow-hidden rounded-full bg-panel-2">
+        <div
+          className="h-full bg-accent transition-[width]"
+          style={{ width: unavailable ? "0%" : `${reservedPercent}%` }}
+        />
+        <div
+          className="h-full bg-ink-faint transition-[width]"
+          style={{
+            width:
+              unavailable || !liveAvailable ? "0%" : `${additionalOSPercent}%`,
+          }}
+        />
+      </div>
+      <div className="mt-1 flex flex-wrap justify-between gap-x-3 text-[10px] text-ink-faint">
+        <span>
+          {unavailable
+            ? "machine offline"
+            : liveAvailable
+              ? `${format(liveUsed)} used by OS`
+              : "collecting live sample…"}
+        </span>
+        <span className="text-accent">{format(reserved)} reserved by Relay</span>
+        <span>
+          {format(free)} schedulable · {format(total)} total
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function acceleratorUsage(machine: Machine, index: number) {
+  return machine.usage?.accelerators?.find((usage) => usage.index === index);
+}
+
+function SpecRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <tr className="border-b border-hair last:border-0">
+      <th className="w-32 py-2 pr-4 text-left text-xs font-medium text-ink-faint">
+        {label}
+      </th>
+      <td className="py-2 text-sm text-ink-dim">{children}</td>
+    </tr>
+  );
 }
 
 function MachineCard({
@@ -453,50 +651,173 @@ function MachineCard({
     (max, r) => (r.updated_at > max ? r.updated_at : max),
     "",
   );
+  const sharedMemoryReserved = reservedMemoryMiB(m);
+  const diskUsed = m.usage?.disk_usage_available
+    ? Math.max(m.usage.disk_total_mib - m.usage.disk_free_mib, 0)
+    : 0;
 
   return (
-    <Card className="px-5 py-4">
-      <div className="mb-3 flex items-center justify-between">
+    <Card className="overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-hair px-5 py-4">
         <span className="flex items-center gap-2.5">
           <StatusDot state={m.online ? "running" : "lost"} />
-          <span className="font-semibold text-ink">{m.name}</span>
-          <span className="font-mono text-xs text-ink-faint">{m.id.slice(0, 10)}</span>
+          <span>
+            <span className="block font-semibold text-ink">{m.name}</span>
+            <span className="mt-0.5 block font-mono text-[10px] text-ink-faint">
+              {m.id}
+            </span>
+          </span>
         </span>
-        <span className="text-xs text-ink-faint">
-          {m.online ? "online" : `last seen ${timeAgo(m.last_seen)}`}
-        </span>
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <Chip>
-          {m.os}/{m.arch}
-        </Chip>
-        <Chip>{m.cpu_cores} cpu</Chip>
-        <Chip>
-          {Math.round(m.memory_mib / 1024)}GB{m.unified_memory ? " unified" : ""}
-        </Chip>
-        {(m.accelerators ?? []).map((a, i) => (
-          <Chip key={i}>{acceleratorLabel(a, m.unified_memory)}</Chip>
-        ))}
-      </div>
-
-      <div className="mt-4 grid grid-cols-3 gap-4 border-t border-hair pt-3 text-sm">
-        <span>
-          <span className="text-ink">{active.length}</span>{" "}
-          <span className="text-ink-faint">active</span>
-        </span>
-        <span>
-          <span className="text-ink">{succeeded}</span>{" "}
-          <span className="text-ink-faint">succeeded</span>
-        </span>
-        <span>
-          <span className="text-ink">{failed}</span>{" "}
-          <span className="text-ink-faint">failed</span>
+        <span className="flex items-center gap-2 text-xs text-ink-faint">
+          <Chip>{m.online ? "available" : "offline"}</Chip>
+          <span>{m.online ? `seen ${timeAgo(m.last_seen)}` : `last seen ${timeAgo(m.last_seen)}`}</span>
         </span>
       </div>
 
-      {active.length > 0 && (
-        <div className="mt-3 space-y-1">
+      <div className="grid lg:grid-cols-[minmax(0,1.15fr)_minmax(20rem,0.85fr)]">
+        <section className="border-b border-hair px-5 py-4 lg:border-b-0 lg:border-r">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-semibold text-ink">
+                Live utilization &amp; capacity
+              </h2>
+              <p className="mt-1 text-xs text-ink-faint">
+                OS use is live; Relay reservations determine schedulable capacity.
+              </p>
+            </div>
+            <span className="shrink-0 font-mono text-xs text-ink-dim">
+              {m.reserved.active_runs} active
+            </span>
+          </div>
+
+          <div className="mb-4 flex flex-wrap gap-4 text-[10px] text-ink-faint">
+            <span className="flex items-center gap-1.5">
+              <span className="size-2 rounded-full bg-ink-faint" /> OS used
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="size-2 rounded-full bg-accent" /> Relay reserved
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="size-2 rounded-full bg-panel-2" /> free
+            </span>
+          </div>
+
+          <div className="space-y-4">
+            <ResourceMeter
+              label="CPU"
+              reserved={m.reserved.cpu_cores}
+              liveUsed={m.usage?.cpu_used_cores}
+              liveAvailable={m.usage?.cpu_usage_available}
+              total={m.cpu_cores}
+              unit="cores"
+              unavailable={!m.online}
+            />
+            <ResourceMeter
+              label={m.unified_memory ? "Unified memory" : "System memory"}
+              reserved={sharedMemoryReserved}
+              liveUsed={m.usage?.memory_used_mib}
+              liveAvailable={m.usage?.memory_usage_available}
+              total={m.memory_mib}
+              unit="memory"
+              unavailable={!m.online}
+            />
+            {!m.unified_memory &&
+              (m.accelerators ?? []).map((accelerator, position) => {
+                const index = accelerator.index ?? position;
+                const reserved =
+                  m.reserved.accelerator_memory_mib?.[String(index)] ?? 0;
+                const live = acceleratorUsage(m, index);
+                return (
+                  <ResourceMeter
+                    key={`${accelerator.kind ?? "accelerator"}-${index}`}
+                    label={`${(accelerator.kind ?? "accelerator").toUpperCase()} ${index} memory`}
+                    reserved={reserved}
+                    liveUsed={live?.memory_used_mib}
+                    liveAvailable={live?.memory_usage_available}
+                    liveDetail={
+                      live?.utilization_available
+                        ? `${Math.round(live.utilization * 100)}% compute`
+                        : undefined
+                    }
+                    total={accelerator.memory_mib ?? 0}
+                    unit="memory"
+                    unavailable={!m.online}
+                  />
+                );
+              })}
+          </div>
+        </section>
+
+        <section className="px-5 py-4">
+          <h2 className="mb-2 text-sm font-semibold text-ink">Specifications</h2>
+          <table className="w-full">
+            <tbody>
+              <SpecRow label="Platform">
+                <span className="capitalize">{m.os}</span> · {m.arch}
+              </SpecRow>
+              <SpecRow label="CPU">{formatCores(m.cpu_cores)}</SpecRow>
+              <SpecRow label="Memory">
+                {formatMiB(m.memory_mib)}{m.unified_memory ? " · unified" : ""}
+              </SpecRow>
+              <SpecRow label="Storage">
+                {m.usage?.disk_usage_available
+                  ? `${formatMiB(m.usage.disk_free_mib)} free of ${formatMiB(m.usage.disk_total_mib)}`
+                  : m.online
+                    ? "Collecting live sample…"
+                    : "Unavailable while offline"}
+                {diskUsed > 0 ? (
+                  <span className="ml-1.5 text-xs text-ink-faint">
+                    · {formatMiB(diskUsed)} used
+                  </span>
+                ) : null}
+              </SpecRow>
+              <SpecRow label="Accelerator">
+                {(m.accelerators ?? []).length === 0
+                  ? "None detected"
+                  : m.accelerators.map((accelerator, index) => (
+                      <div key={`${accelerator.kind ?? "accelerator"}-${index}`}>
+                        <span className="text-ink">{accelerator.name || "Unknown"}</span>
+                        <span className="ml-1.5 text-xs text-ink-faint">
+                          {(accelerator.kind ?? "?").toUpperCase()}
+                          {m.unified_memory
+                            ? " · shared memory"
+                            : accelerator.memory_mib
+                              ? ` · ${formatMiB(accelerator.memory_mib)}`
+                              : ""}
+                        </span>
+                      </div>
+                    ))}
+              </SpecRow>
+              <SpecRow label="Executors">
+                <div className="flex flex-wrap gap-1.5">
+                  {(m.executors ?? []).map((executor) => (
+                    <Chip key={executor}>{executor}</Chip>
+                  ))}
+                </div>
+              </SpecRow>
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      <div className="border-t border-hair px-5 py-3">
+        <div className="grid grid-cols-3 gap-4 text-sm">
+          <span>
+            <span className="text-ink">{active.length}</span>{" "}
+            <span className="text-ink-faint">active</span>
+          </span>
+          <span>
+            <span className="text-ink">{succeeded}</span>{" "}
+            <span className="text-ink-faint">succeeded</span>
+          </span>
+          <span>
+            <span className="text-ink">{failed}</span>{" "}
+            <span className="text-ink-faint">failed</span>
+          </span>
+        </div>
+
+        {active.length > 0 && (
+          <div className="mt-3 space-y-1">
           {active.slice(0, 4).map((r) => (
             <button
               key={r.id}
@@ -518,16 +839,17 @@ function MachineCard({
               +{active.length - 4} more
             </div>
           )}
-        </div>
-      )}
+          </div>
+        )}
 
-      {active.length === 0 && (
-        <div className="mt-3 px-0.5 text-xs text-ink-faint">
+        {active.length === 0 && (
+          <div className="mt-3 px-0.5 text-xs text-ink-faint">
           {runs.length === 0
             ? "no recent runs"
             : `idle · last run ${timeAgo(lastRun)}`}
-        </div>
-      )}
+          </div>
+        )}
+      </div>
     </Card>
   );
 }
@@ -722,10 +1044,12 @@ function Timeline({ events, terminal, now }: { events: RunEvent[]; terminal: boo
 export function RunDrawer({
   target,
   initial,
+  visible,
   onClose,
 }: {
   target: DrawerTarget;
   initial?: Run;
+  visible: boolean;
   onClose: () => void;
 }) {
   const [run, setRun] = useState<Run | null>(initial ?? null);
@@ -736,6 +1060,7 @@ export function RunDrawer({
   const preRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
+    if (!visible) return;
     let alive = true;
     const load = () =>
       fetchRun(target.id)
@@ -750,9 +1075,10 @@ export function RunDrawer({
       alive = false;
       clearInterval(id);
     };
-  }, [target.id]);
+  }, [target.id, visible]);
 
   useEffect(() => {
+    if (!visible) return;
     setText("");
     setDone(false);
     const abort = streamLogs(
@@ -761,7 +1087,7 @@ export function RunDrawer({
       () => setDone(true),
     );
     return abort;
-  }, [target.id]);
+  }, [target.id, visible]);
 
   useEffect(() => {
     const el = preRef.current;
